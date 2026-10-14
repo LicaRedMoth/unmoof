@@ -38,7 +38,7 @@ unsafe fn bytes<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
     if len == 0 { &[] } else { unsafe { std::slice::from_raw_parts(ptr, len) } }
 }
 
-/// 1 for fMP4, 2 for MPEG-TS, 3 for HLS packed audio, 0 for none of them.
+/// 1 for fMP4, 2 for MPEG-TS, 3 for HLS packed audio, 4 for subtitles, 0 for none of them.
 ///
 /// # Safety
 /// `ptr` must point at `len` readable bytes.
@@ -48,6 +48,7 @@ pub unsafe extern "C" fn unmoof_sniff(ptr: *const u8, len: usize) -> u32 {
         Some(Format::Fmp4) => 1,
         Some(Format::Ts) => 2,
         Some(Format::PackedAudio) => 3,
+        Some(Format::Subtitles) => 4,
         None => 0,
     }
 }
@@ -161,6 +162,20 @@ pub unsafe extern "C" fn unmoof_feed_ts(h: *mut RState, source: u32, file: u32, 
     }
 }
 
+/// Feeds a SubRip, WebVTT or ASS/SSA file to a source's text track.
+///
+/// # Safety
+/// `h` must come from `unmoof_new`; `ptr` must point at `len` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn unmoof_feed_subtitles(h: *mut RState, source: u32, ptr: *const u8, len: usize) -> u32 {
+    let st = unsafe { &mut *h };
+    let Some(rm) = st.rm.as_mut() else { return fail(&mut st.buf, "the remuxer has finished") };
+    match rm.feed_subtitles(source as usize, unsafe { bytes(ptr, len) }) {
+        Ok(()) => 0,
+        Err(e) => fail(&mut st.buf, e),
+    }
+}
+
 /// Lays the file out. Returns a plan handle, or null with the message in the remuxer's buffer.
 /// The remuxer takes no more input afterwards.
 ///
@@ -238,7 +253,7 @@ pub unsafe extern "C" fn unmoof_plan_buf_len(p: *mut PState) -> usize {
 }
 
 /// Puts the plan as JSON in the plan's buffer: size, pieces (`[0, file, offset, len]` to copy,
-/// `[1, file, len]` to render), tracks and warnings.
+/// `[1, file, len]` to render, `[2, len]` made here, see `unmoof_plan_data`), tracks and warnings.
 ///
 /// # Safety
 /// `p` must come from `unmoof_finish`.
@@ -255,6 +270,7 @@ pub unsafe extern "C" fn unmoof_plan_info(p: *mut PState) {
         let _ = match piece {
             Piece::Copy(r) => write!(s, "[0,{},{},{}]", r.file, r.offset, r.len),
             Piece::Render { file, len, .. } => write!(s, "[1,{file},{len}]"),
+            Piece::Data(d) => write!(s, "[2,{}]", d.len()),
         };
     }
     s.push_str("],\"tracks\":[");
@@ -301,6 +317,23 @@ fn json_str(v: &str) -> String {
     }
     s.push('"');
     s
+}
+
+/// Puts the bytes of a data piece (subtitle samples) in the plan's buffer. Returns 1 if the
+/// piece is of another kind.
+///
+/// # Safety
+/// `p` must come from `unmoof_finish`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn unmoof_plan_data(p: *mut PState, piece: u32) -> u32 {
+    let st = unsafe { &mut *p };
+    match st.plan.pieces.get(piece as usize) {
+        Some(Piece::Data(d)) => {
+            st.buf = d.clone();
+            0
+        }
+        _ => fail(&mut st.buf, format!("piece {piece} is not a data piece")),
+    }
 }
 
 /// Cuts the samples of a render piece out of the TS file it names; the bytes go to the plan's

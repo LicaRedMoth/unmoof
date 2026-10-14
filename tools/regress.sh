@@ -136,6 +136,25 @@ if [ -d $M/hls_mp3 ]; then
     rm -f $O/*.mp3 $O/packed_aac*.mp4 $O/vid_mp3*.mp4
 fi
 
+# Subtitles: SubRip against ffmpeg's mov_text; segmented HLS WebVTT over TS video and ASS
+# against SRT dumps checked by hand once (sync, overlap, styles, drawings left out).
+B=$T/synth/subs
+if [ -f $B/sub.srt ]; then
+    ffmpeg -v error -y -i $B/sub_v.mp4 -i $B/sub.srt -map 0 -map 1 -c:v copy -c:s mov_text $O/sub_ref.mp4
+    $U -o $O/sub.mp4 -s $B/sub_v_frag.mp4 -s $B/sub.srt 2>/dev/null
+    check subtitles-srt $O/sub_ref.mp4 $O/sub.mp4
+    $U -o $O/sub_hls.mp4 -s $(segs $B/hls/v.m3u8) -s $B/hls/s0.vtt $B/hls/s1.vtt 2>/dev/null
+    $U -o $O/sub_ass.mp4 -s $B/sub_v_frag.mp4 -s $B/s.ass 2>/dev/null
+    for k in hls ass; do
+        if ffmpeg -v error -i $O/sub_$k.mp4 -map 0:s -f srt - 2>/dev/null | cmp -s - $B/$k.expected.srt; then
+            echo "PASS subtitles-$k"; pass=$((pass + 1))
+        else
+            echo "FAIL subtitles-$k (SRT dump differs from $B/$k.expected.srt)"; fail=$((fail + 1))
+        fi
+    done
+    rm -f $O/sub*.mp4
+fi
+
 # A real VK track (the user's own upload): HLS, MP3 320 in TS, AES-128 segments already
 # decrypted by the fetch, with an ID3 tag inside the audio stream.
 if [ -f $T/vk/seg-00.ts ]; then

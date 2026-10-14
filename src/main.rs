@@ -111,11 +111,15 @@ fn scan(rm: &mut Remuxer, source: usize, id: u32, path: &PathBuf) -> Result<u64,
     f.read_exact(&mut head)?;
     match unmoof::sniff(&head) {
         Some(Format::Fmp4) => {}
+        Some(Format::Subtitles) => {
+            rm.feed_subtitles(source, &std::fs::read(path)?)?;
+            return Ok(len);
+        }
         Some(Format::Ts | Format::PackedAudio) => {
             rm.feed_ts(source, id, &std::fs::read(path)?)?;
             return Ok(len);
         }
-        None => return Err("neither fMP4, MPEG-TS nor HLS packed audio".into()),
+        None => return Err("neither fMP4, MPEG-TS, HLS packed audio nor subtitles".into()),
     }
     let mut pos = 0u64;
     let mut buf = Vec::new();
@@ -172,6 +176,10 @@ fn write(plan: &Plan, files: &[(PathBuf, u64)], to: &PathBuf) -> io::Result<()> 
     for (i, piece) in plan.pieces.iter().enumerate() {
         let r = match piece {
             Piece::Copy(r) => r,
+            Piece::Data(d) => {
+                w.write_all(d)?;
+                continue;
+            }
             Piece::Render { file, .. } => {
                 if ts.as_ref().is_none_or(|(id, _)| id != file) {
                     ts = Some((*file, std::fs::read(&files[*file as usize].0)?));

@@ -445,6 +445,13 @@ pub fn vmhd() -> Vec<u8> {
     w.v
 }
 
+pub fn nmhd() -> Vec<u8> {
+    let mut w = Wr::default();
+    let at = w.open_full(b"nmhd", 0, 0);
+    w.close(at);
+    w.v
+}
+
 pub fn smhd() -> Vec<u8> {
     let mut w = Wr::default();
     let at = w.open_full(b"smhd", 0, 0);

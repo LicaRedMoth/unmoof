@@ -56,6 +56,8 @@ for (const piece of plan.pieces) {
     const b = Buffer.alloc(len);
     readSync(files[file].fd, b, 0, len, offset);
     writeSync(o, b);
+  } else if (piece.data) {
+    writeSync(o, plan.data(piece.data.index));
   } else {
     const { file, index } = piece.render;
     if (!ts || ts.file !== file) ts = { file, bytes: readFileSync(files[file].path) };

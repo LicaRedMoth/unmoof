@@ -11,6 +11,7 @@ mod bytes;
 mod codec;
 mod demux;
 mod mux;
+mod subs;
 mod ts;
 mod tsfeed;
 
@@ -25,6 +26,8 @@ pub enum Format {
     Ts,
     /// HLS packed audio: AAC or MPEG audio frames, usually behind an ID3 tag.
     PackedAudio,
+    /// SubRip, WebVTT or ASS/SSA subtitles.
+    Subtitles,
 }
 
 /// Tells fMP4 from MPEG-TS. `head` should be the first few kilobytes of the file, or all of it.
@@ -33,6 +36,8 @@ pub fn sniff(head: &[u8]) -> Option<Format> {
         [b"ftyp", b"styp", b"moov", b"moof", b"sidx", b"free", b"skip", b"emsg", b"prft", b"mdat", b"uuid"];
     if head.len() >= 8 && BOXES.iter().any(|t| head[4..8] == t[..]) {
         Some(Format::Fmp4)
+    } else if subs::sniff(head).is_some() {
+        Some(Format::Subtitles)
     } else if ts::sniff(head) {
         Some(Format::Ts)
     } else if ts::sniff_packed(head) {
@@ -117,6 +122,25 @@ impl Remuxer {
             bail!("source {source} mixes fMP4 and MPEG-TS files");
         }
         self.read_ts(source, file, data)
+    }
+
+    /// Reads a SubRip, WebVTT or ASS/SSA file into the source's text track. Times count from the
+    /// start of the movie, unless a WebVTT file carries the `X-TIMESTAMP-MAP` of HLS, which ties
+    /// it to the clock of the stream. The files of segmented WebVTT join into one track.
+    pub fn feed_subtitles(&mut self, source: usize, data: &[u8]) -> Result<()> {
+        let Some(s) = self.sources.get_mut(source) else { bail!("source {source} was never opened") };
+        if s.moov.is_some() || s.ts.is_some() {
+            bail!("source {source} mixes subtitles with audio or video files");
+        }
+        let (kind, cues, tied) = subs::parse(data)?;
+        let st = s.subs.get_or_insert(demux::SubSource { kind, cues: Vec::new(), tied });
+        if st.tied != tied {
+            self.warnings.push(format!(
+                "source {source}: some WebVTT files are tied to the stream clock and some are not; timing may be off"
+            ));
+        }
+        st.cues.extend(cues);
+        Ok(())
     }
 
     /// Reads the boxes in `data`, which starts at byte `offset` of input file `file`.

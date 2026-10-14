@@ -8,6 +8,7 @@
 //   // the file is plan.header, then each of plan.pieces in order:
 //   //   { copy: { file, offset, len } }  bytes of input file `file`, as they are
 //   //   { render: { file, len, index } } plan.render(index, wholeTsFile)
+//   //   { data: { len, index } }         plan.data(index), bytes made by unmoof (subtitles)
 
 /** Loads the module from a Response, URL, ArrayBuffer, typed array or WebAssembly.Module. */
 export async function init(source) {
@@ -29,9 +30,9 @@ class Unmoof {
     this.x = x;
   }
 
-  /** 'fmp4', 'ts', 'packed' (HLS packed audio) or null, judged from the first 64 KiB of a file. */
+  /** 'fmp4', 'ts', 'packed' (HLS packed audio), 'subtitles' or null, from a file's first 64 KiB. */
   sniff(head) {
-    return [null, 'fmp4', 'ts', 'packed'][this.#with(head, (p, n) => this.x.unmoof_sniff(p, n))];
+    return [null, 'fmp4', 'ts', 'packed', 'subtitles'][this.#with(head, (p, n) => this.x.unmoof_sniff(p, n))];
   }
 
   remuxer() {
@@ -105,6 +106,11 @@ class Remuxer {
     this.#check(this.#um.withBytes(bytes, (p, n) => this.#um.x.unmoof_feed(this.#h, source, file, offset, p, n)));
   }
 
+  /** Feeds a SubRip, WebVTT or ASS/SSA file to a source's text track. */
+  feedSubtitles(source, bytes) {
+    this.#check(this.#um.withBytes(bytes, (p, n) => this.#um.x.unmoof_feed_subtitles(this.#h, source, p, n)));
+  }
+
   /** Feeds a whole MPEG-TS file or HLS packed audio segment. */
   feedTs(source, file, bytes) {
     this.#check(this.#um.withBytes(bytes, (p, n) => this.#um.x.unmoof_feed_ts(this.#h, source, file, p, n)));
@@ -112,12 +118,16 @@ class Remuxer {
 
   /**
    * Feeds input file `file` of `size` bytes, reading only what is needed: the moov and moof boxes
-   * of fMP4, or the whole of an MPEG-TS file. `readAt(offset, length)` resolves to the bytes.
-   * Returns 'fmp4' or 'ts'.
+   * of fMP4, or the whole of other files. `readAt(offset, length)` resolves to the bytes.
+   * Returns the kind of file, as `sniff` names it.
    */
   async feedFile(source, file, size, readAt) {
     const head = await readAt(0, Math.min(size, 65536));
     const kind = this.#um.sniff(head);
+    if (kind === 'subtitles') {
+      this.feedSubtitles(source, size <= head.length ? head : await readAt(0, size));
+      return kind;
+    }
     if (kind === 'ts' || kind === 'packed') {
       this.feedTs(source, file, size <= head.length ? head : await readAt(0, size));
       return kind;
@@ -182,7 +192,18 @@ class Plan {
     this.tracks = info.tracks;
     this.warnings = info.warnings;
     this.pieces = info.pieces.map((v, index) =>
-      v[0] === 0 ? { copy: { file: v[1], offset: v[2], len: v[3] } } : { render: { file: v[1], len: v[2], index } });
+      v[0] === 0 ? { copy: { file: v[1], offset: v[2], len: v[3] } }
+        : v[0] === 1 ? { render: { file: v[1], len: v[2], index } }
+        : { data: { len: v[1], index } });
+  }
+
+  /** The bytes of a data piece: subtitle samples made by unmoof. */
+  data(index) {
+    const um = this.#um, x = um.x;
+    const status = x.unmoof_plan_data(this.#p, index);
+    const out = um.copyOut(x.unmoof_plan_buf_ptr(this.#p), x.unmoof_plan_buf_len(this.#p));
+    if (status !== 0) throw new Error('unmoof: ' + new TextDecoder().decode(out));
+    return out;
   }
 
   /** The bytes of a render piece, cut out of `tsFile`, the whole MPEG-TS input file it names. */

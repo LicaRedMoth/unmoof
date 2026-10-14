@@ -41,6 +41,8 @@ pub struct TrackReport {
 pub enum Piece {
     /// Bytes copied from an input file as they are.
     Copy(Range),
+    /// Bytes made by unmoof itself: subtitle samples.
+    Data(Vec<u8>),
     /// Samples cut out of an MPEG-TS input file: [`Plan::render`] makes the `len` bytes.
     Render { file: u32, len: u64, source: usize, parts: Vec<(usize, u32, u32)> },
 }
@@ -49,6 +51,7 @@ impl Piece {
     pub fn len(&self) -> u64 {
         match self {
             Piece::Copy(r) => r.len,
+            Piece::Data(d) => d.len() as u64,
             Piece::Render { len, .. } => *len,
         }
     }
@@ -132,7 +135,21 @@ impl Remuxer {
         let mut warnings = self.warnings;
         let mut tracks = Vec::new();
         let mut snapped = Vec::new();
-        for mut t in self.tracks {
+        let mut all = self.tracks;
+        for (si, src) in self.sources.iter().enumerate() {
+            let Some(sub) = &src.subs else { continue };
+            match subtitle_track(si, sub) {
+                Some(t) => all.push(t),
+                None => warnings.push(format!("source {si}: the subtitles hold no cue")),
+            }
+            if sub.kind == crate::subs::Kind::Ass {
+                warnings.push(format!(
+                    "source {si}: ASS styles, positions and effects cannot be carried in MP4; \
+                     the text is kept with bold, italic and underline"
+                ));
+            }
+        }
+        for mut t in all {
             let src = &self.sources[t.source];
             if let Some(lang) = src.language {
                 t.language = lang;
@@ -189,9 +206,16 @@ impl Remuxer {
                 total,
             });
         }
-        let t0 = starts.iter().copied().fold(f64::INFINITY, f64::min);
-        for (l, s) in lays.iter_mut().zip(&starts) {
-            l.delay = ((s - t0) * MOVIE_TS as f64).round() as u64;
+        // Subtitles from a sidecar file start with the movie, wherever its other tracks start.
+        let t0 = tracks
+            .iter()
+            .zip(&starts)
+            .filter(|(t, _)| !t.relative)
+            .map(|(_, &s)| s)
+            .fold(f64::INFINITY, f64::min);
+        let t0 = if t0.is_finite() { t0 } else { 0.0 };
+        for ((l, s), t) in lays.iter_mut().zip(&starts).zip(&tracks) {
+            l.delay = if t.relative { 0 } else { ((s - t0) * MOVIE_TS as f64).round() as u64 };
         }
 
         // Chunks: runs of samples that lie back to back in one input file.
@@ -243,6 +267,15 @@ impl Remuxer {
         for c in &chunks {
             placed[c.track].push(Placed { pos: payload, count: c.count, sdi: c.sdi });
             let t = &tracks[c.track];
+            if !t.data.is_empty() {
+                let bytes = &t.data[c.off as usize..(c.off + c.len) as usize];
+                match pieces.last_mut() {
+                    Some(Piece::Data(d)) => d.extend_from_slice(bytes),
+                    _ => pieces.push(Piece::Data(bytes.to_vec())),
+                }
+                payload += c.len;
+                continue;
+            }
             match (t.ts_stream, pieces.last_mut()) {
                 (None, Some(Piece::Copy(r))) if r.file == c.file && r.offset + r.len == c.off => r.len += c.len,
                 (None, _) => pieces.push(Piece::Copy(Range { file: c.file, offset: c.off, len: c.len })),
@@ -308,6 +341,38 @@ impl Remuxer {
             .collect();
         Ok(Plan { size: header.len() as u64 + payload, header, pieces, ts_streams, tracks: reports, warnings })
     }
+}
+
+/// The text track of a subtitle source: one `tx3g` sample per stretch of screen time.
+fn subtitle_track(source: usize, sub: &crate::demux::SubSource) -> Option<Track> {
+    let mut cues = sub.cues.clone();
+    cues.sort_by_key(|c| (c.start, c.end));
+    // Segmented WebVTT repeats a cue in every segment it spans.
+    cues.dedup();
+    let first = cues.first()?.start;
+    let from = if sub.tied { first } else { 0.min(first) };
+    let mut t = Track::blank(source);
+    t.handler = *b"sbtl";
+    t.codec = *b"tx3g";
+    t.timescale = 1000;
+    t.hdlr = crate::codec::hdlr(b"sbtl", "SubtitleHandler");
+    t.media_header = crate::codec::nmhd();
+    t.stsd = crate::subs::tx3g_stsd();
+    t.relative = !sub.tied;
+    for (start, dur, bytes) in crate::subs::samples(&cues, from) {
+        t.samples.push(crate::demux::Sample {
+            dts: start,
+            dur,
+            size: bytes.len() as u32,
+            cto: 0,
+            sync: true,
+            sdi: 1,
+            file: u32::MAX,
+            off: t.data.len() as u64,
+        });
+        t.data.extend_from_slice(&bytes);
+    }
+    Some(t)
 }
 
 /// True if the sample entry is `mp4a` holding MPEG-1 or MPEG-2 audio (object type 0x6b or 0x69).

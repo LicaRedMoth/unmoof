@@ -55,5 +55,12 @@ if [ -d $M/hls_mp3 ]; then
     same aac-from-packed -s $(ls -v $M/packed_aac/*)
     same video-mp3-ts -s $(segs $M/vid_mp3/index.m3u8)
 fi
+B=$S/subs
+if [ -f $B/sub.srt ]; then
+    same subtitles-srt -s $B/sub_v_frag.mp4 -s --lang rus $B/sub.srt
+    same subtitles-hls -s $(segs $B/hls/v.m3u8) -s $B/hls/s0.vtt $B/hls/s1.vtt
+    same subtitles-ass -s $B/sub_v_frag.mp4 -s $B/s.ass
+fi
+[ -f $T/vk/seg-00.ts ] && same vk.mp3 -s $(ls -v $T/vk/seg-*.ts)
 echo "$pass same, $fail different"
 [ $fail -eq 0 ]

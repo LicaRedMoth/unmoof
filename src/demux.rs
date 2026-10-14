@@ -14,6 +14,15 @@ pub struct Source {
     /// Language and title the caller knows from the playlist, for every track of the source.
     pub language: Option<u16>,
     pub title: Option<String>,
+    /// Set when the source is subtitles.
+    pub subs: Option<SubSource>,
+}
+
+pub struct SubSource {
+    pub kind: crate::subs::Kind,
+    pub cues: Vec<crate::subs::Cue>,
+    /// Times follow the stream's clock (HLS WebVTT) rather than starting with the movie.
+    pub tied: bool,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -76,6 +85,11 @@ pub struct Track {
     pub ts_stream: Option<usize>,
     /// A name for players to show, such as the studio of a dub.
     pub title: Option<String>,
+    /// Sample bytes made here rather than found in an input file, for subtitles. Their samples
+    /// name file `u32::MAX`, and `Sample::off` is an offset into this.
+    pub data: Vec<u8>,
+    /// Times count from the start of the movie, not from a clock the other tracks share.
+    pub relative: bool,
 }
 
 impl Track {
@@ -103,6 +117,8 @@ impl Track {
             fixes: 0,
             ts_stream: None,
             title: None,
+            data: Vec::new(),
+            relative: false,
         }
     }
 
