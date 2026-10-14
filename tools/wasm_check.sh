@@ -12,16 +12,17 @@ wasm-opt -Oz --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sig
 echo "unmoof.wasm: $(stat -c %s wasm/unmoof.wasm) bytes, $(gzip -9 -c wasm/unmoof.wasm | wc -c) gzipped"
 
 pass=0; fail=0
-same() { # name, then the arguments both builds get
-    local name=$1; shift
-    target/release/unmoof -o "$O/$name.native.mp4" "$@" 2>/dev/null
-    node wasm/cli.mjs -o "$O/$name.wasm.mp4" "$@" 2>/dev/null
-    if cmp -s "$O/$name.native.mp4" "$O/$name.wasm.mp4"; then
-        echo "SAME $name"; pass=$((pass + 1))
+same() { # name, then the arguments both builds get; a name ending in .mp3 makes an .mp3
+    local name=$1 ext=mp4; shift
+    [[ $name == *.mp3 ]] && ext=mp3 && name=${name%.mp3}
+    target/release/unmoof -o "$O/$name.native.$ext" "$@" 2>/dev/null
+    node wasm/cli.mjs -o "$O/$name.wasm.$ext" "$@" 2>/dev/null
+    if cmp -s "$O/$name.native.$ext" "$O/$name.wasm.$ext"; then
+        echo "SAME $name.$ext"; pass=$((pass + 1))
     else
-        echo "DIFF $name"; fail=$((fail + 1))
+        echo "DIFF $name.$ext"; fail=$((fail + 1))
     fi
-    rm -f "$O/$name.native.mp4" "$O/$name.wasm.mp4"
+    rm -f "$O/$name.native.$ext" "$O/$name.wasm.$ext"
 }
 segs() { grep -v '^#' "$1" | grep -v '^$' | sed "s#^#$(dirname "$1")/#"; }
 
@@ -46,6 +47,13 @@ if [ -d $S/ts_plain ]; then
     [ -d $C ] && same synth-dubs-titled -s $C/init-stream0.m4s $(ls -v $C/chunk-stream0-*) \
         -s --lang rus --title AniLibria $C/init-stream1.m4s $(ls -v $C/chunk-stream1-*) \
         -s --lang jpn --title Оригинал $C/init-stream2.m4s $(ls -v $C/chunk-stream2-*)
+fi
+M=$S/mp3
+if [ -d $M/hls_mp3 ]; then
+    same mp3-from-ts.mp3 -s $(segs $M/hls_mp3/index.m3u8)
+    same mp3-from-packed.mp3 -s $(ls -v $M/packed_mp3/*)
+    same aac-from-packed -s $(ls -v $M/packed_aac/*)
+    same video-mp3-ts -s $(segs $M/vid_mp3/index.m3u8)
 fi
 echo "$pass same, $fail different"
 [ $fail -eq 0 ]

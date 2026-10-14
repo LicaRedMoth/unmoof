@@ -15,7 +15,7 @@ usage: unmoof -o OUT.mp4 -s FILE... [-s FILE...]...
               its own, such as DASH audio, is another -s.
   --lang L    after -s: the language of that source's tracks (ISO 639-2: rus, jpn)
   --title T   after -s: a title for them, such as the studio of a dub
-  -o OUT      the progressive MP4 to write
+  -o OUT      the file to write: an MP4, or with .mp3, the bare frames of an MP3 track
   --chunk MS  the longest a chunk may run, in milliseconds (default 500)";
 
 fn main() -> ExitCode {
@@ -80,7 +80,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             files.push((path.clone(), len));
         }
     }
-    let plan = rm.finish()?;
+    // An .mp3 output is the bare frames of the MP3 track; anything else is an MP4.
+    let mp3 = out.extension().is_some_and(|e| e.eq_ignore_ascii_case("mp3"));
+    let plan = if mp3 { rm.finish_mp3()? } else { rm.finish()? };
     for r in plan.pieces.iter().filter_map(|p| if let Piece::Copy(r) = p { Some(r) } else { None }) {
         let (path, len) = &files[r.file as usize];
         if r.offset + r.len > *len {
@@ -93,7 +95,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let part = out.with_extension("mp4.part");
+    let part = out.with_extension("part");
     write(&plan, &files, &part)?;
     std::fs::rename(&part, &out)?;
     report(&plan, &out);
@@ -109,11 +111,11 @@ fn scan(rm: &mut Remuxer, source: usize, id: u32, path: &PathBuf) -> Result<u64,
     f.read_exact(&mut head)?;
     match unmoof::sniff(&head) {
         Some(Format::Fmp4) => {}
-        Some(Format::Ts) => {
+        Some(Format::Ts | Format::PackedAudio) => {
             rm.feed_ts(source, id, &std::fs::read(path)?)?;
             return Ok(len);
         }
-        None => return Err("neither fMP4 nor MPEG-TS".into()),
+        None => return Err("neither fMP4, MPEG-TS nor HLS packed audio".into()),
     }
     let mut pos = 0u64;
     let mut buf = Vec::new();

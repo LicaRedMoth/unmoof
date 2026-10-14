@@ -43,7 +43,7 @@ for (const [g, group] of sources.entries()) {
     files.push({ path, fd, size });
   }
 }
-const plan = rm.finish();
+const plan = /\.mp3$/i.test(out) ? rm.finishMp3() : rm.finish();
 const t1 = performance.now();
 
 const part = out + '.part';

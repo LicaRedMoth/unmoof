@@ -1,4 +1,5 @@
-//! MPEG-TS input: HLS segments carrying H.264 and AAC.
+//! MPEG-TS input: HLS segments carrying H.264, AAC and MPEG audio, and HLS packed audio (bare
+//! AAC or MP3 frames behind an ID3 tag that holds the time).
 //!
 //! Unlike fMP4, the samples of a TS file are scattered over 188-byte packets and wrapped in
 //! Annex B start codes or ADTS headers, so they cannot be copied as they lie. A TS file is read
@@ -6,7 +7,7 @@
 //! to cut its samples out ([`crate::Plan::render`]). Both readings go through [`samples`], so
 //! they agree on every sample. Nothing is kept between them but the tables.
 
-use crate::codec::{self, Adts};
+use crate::codec::{self, Adts, Mpa};
 use crate::{bail, Result};
 
 /// Stream types read from the PMT.
@@ -14,6 +15,8 @@ use crate::{bail, Result};
 pub enum Es {
     H264,
     Aac,
+    /// MP1, MP2 or MP3.
+    Mpa,
 }
 
 impl Es {
@@ -21,7 +24,16 @@ impl Es {
         match t {
             0x1b => Some(Es::H264),
             0x0f => Some(Es::Aac),
+            0x03 | 0x04 => Some(Es::Mpa),
             _ => None,
+        }
+    }
+
+    fn stream_type(self) -> u8 {
+        match self {
+            Es::H264 => 0x1b,
+            Es::Aac => 0x0f,
+            Es::Mpa => 0x03,
         }
     }
 }
@@ -35,6 +47,7 @@ pub struct Unit {
     pub data: Vec<u8>,
     pub sync: bool,
     pub adts: Option<Adts>,
+    pub mpa: Option<Mpa>,
 }
 
 /// Where the 188-byte packets start: the first sync byte that two more follow at the packet
@@ -258,8 +271,7 @@ pub fn streams(b: &[u8]) -> Result<(Vec<(Es, u16)>, Vec<u8>)> {
 /// anywhere. A PES time belongs to the first frame that starts inside that PES (ISO/IEC
 /// 13818-1, 2.4.3.7); later frames of it have none, and AAC frames count on from it.
 pub fn samples(b: &[u8], pids: &[(Es, u16)]) -> Result<(Vec<Vec<Unit>>, usize)> {
-    let known: Vec<(u8, u16)> =
-        pids.iter().map(|&(e, pid)| (if e == Es::H264 { 0x1b } else { 0x0f }, pid)).collect();
+    let known: Vec<(u8, u16)> = pids.iter().map(|&(e, pid)| (e.stream_type(), pid)).collect();
     let d = read_ts(b, &known)?;
     let mut es: Vec<(Vec<u8>, Vec<Mark>)> = pids.iter().map(|_| (Vec::new(), Vec::new())).collect();
     for pes in d.pes {
@@ -274,6 +286,7 @@ pub fn samples(b: &[u8], pids: &[(Es, u16)]) -> Result<(Vec<Vec<Unit>>, usize)> 
         out.push(match pids[i].0 {
             Es::H264 => h264_units(buf, marks),
             Es::Aac => aac_units(buf, marks, &mut broken),
+            Es::Mpa => mpa_units(buf, marks, &mut broken),
         });
     }
     Ok((out, broken))
@@ -362,7 +375,7 @@ fn h264_units(b: &[u8], marks: &[Mark]) -> Vec<Unit> {
             _ => (None, None),
         };
         let sync = codec::nals(&data).any(|n| n[0] & 0x1f == 5);
-        out.push(Unit { pts, dts, frame_in_pes: 0, data, sync, adts: None });
+        out.push(Unit { pts, dts, frame_in_pes: 0, data, sync, adts: None, mpa: None });
     }
     out
 }
@@ -400,8 +413,118 @@ fn aac_units(b: &[u8], marks: &[Mark], broken: &mut usize) -> Vec<Unit> {
             data: b[p + a.header_len..p + a.frame_len].to_vec(),
             sync: true,
             adts: Some(a),
+            mpa: None,
         });
         p += a.frame_len;
     }
     out
+}
+
+/// MPEG audio frames; unlike ADTS the sample keeps its header, as MP4 stores MP3 frames whole.
+fn mpa_units(b: &[u8], marks: &[Mark], broken: &mut usize) -> Vec<Unit> {
+    let mut clock = Clock { marks, used: 0 };
+    let mut out = Vec::new();
+    let (mut base, mut k) = (None, 0u32);
+    let mut p = 0;
+    let mut junk = false;
+    while p + 4 <= b.len() {
+        let Some(m) = Mpa::parse(&b[p..]) else {
+            if !junk {
+                *broken += 1;
+                junk = true;
+            }
+            p += 1;
+            continue;
+        };
+        junk = false;
+        if p + m.frame_len > b.len() {
+            break;
+        }
+        match clock.at(p) {
+            (Some(mk), true) if mk.pts.is_some() => {
+                base = mk.pts;
+                k = 0;
+            }
+            _ => k += 1,
+        }
+        out.push(Unit {
+            pts: base,
+            dts: base,
+            frame_in_pes: k,
+            data: b[p..p + m.frame_len].to_vec(),
+            sync: true,
+            adts: None,
+            mpa: Some(m),
+        });
+        p += m.frame_len;
+    }
+    out
+}
+
+/// True if `b` starts like an HLS packed audio segment: an ID3 tag, or bare ADTS or MPEG audio.
+pub fn sniff_packed(b: &[u8]) -> bool {
+    b.starts_with(b"ID3") || Adts::parse(b).is_some() || Mpa::parse(b).is_some()
+}
+
+/// The time an HLS packed audio segment starts at, from the PRIV frame Apple's spec puts in its
+/// ID3 tag, and where the frames begin.
+fn packed_time(b: &[u8]) -> (Option<u64>, usize) {
+    let mut at = 0;
+    let mut time = None;
+    while b.len() >= at + 10 && &b[at..at + 3] == b"ID3" {
+        let size = b[at + 6..at + 10].iter().fold(0usize, |v, &x| v << 7 | (x & 0x7f) as usize);
+        let footer = if b[at + 5] & 0x10 != 0 { 10 } else { 0 };
+        let end = (at + 10 + size + footer).min(b.len());
+        let v4 = b[at + 3] == 4;
+        let mut f = at + 10;
+        while f + 10 <= end && b[f] != 0 {
+            let raw = &b[f + 4..f + 8];
+            let n = if v4 {
+                raw.iter().fold(0usize, |v, &x| v << 7 | (x & 0x7f) as usize)
+            } else {
+                u32::from_be_bytes(raw.try_into().unwrap()) as usize
+            };
+            let data = &b[(f + 10).min(end)..(f + 10 + n).min(end)];
+            const OWNER: &[u8] = b"com.apple.streaming.transportStreamTimestamp\0";
+            if &b[f..f + 4] == b"PRIV" && data.starts_with(OWNER) && data.len() >= OWNER.len() + 8 {
+                let t = u64::from_be_bytes(data[OWNER.len()..OWNER.len() + 8].try_into().unwrap());
+                time = Some(t & ((1 << 33) - 1));
+            }
+            f += 10 + n;
+        }
+        at = end;
+    }
+    (time, at)
+}
+
+/// The kind of frames an HLS packed audio segment holds.
+pub fn packed_kind(b: &[u8]) -> Option<Es> {
+    let (_, at) = packed_time(b);
+    let rest = &b[at.min(b.len())..];
+    if Adts::parse(rest).is_some() {
+        Some(Es::Aac)
+    } else if Mpa::parse(rest).is_some() {
+        Some(Es::Mpa)
+    } else {
+        None
+    }
+}
+
+/// The samples of an HLS packed audio segment, as one stream.
+fn packed_units(b: &[u8], es: Es) -> Result<(Vec<Vec<Unit>>, usize)> {
+    let (time, at) = packed_time(b);
+    let marks = [Mark { at: 0, pts: time, dts: time }];
+    let mut broken = 0;
+    let rest = &b[at.min(b.len())..];
+    let units = match es {
+        Es::Aac => aac_units(rest, &marks, &mut broken),
+        Es::Mpa => mpa_units(rest, &marks, &mut broken),
+        Es::H264 => bail!("packed audio cannot hold video"),
+    };
+    Ok((vec![units], broken))
+}
+
+/// The samples of a TS file, or of a packed audio segment when `packed`; see [`samples`].
+pub fn units(b: &[u8], pids: &[(Es, u16)], packed: bool) -> Result<(Vec<Vec<Unit>>, usize)> {
+    if packed { packed_units(b, pids[0].0) } else { samples(b, pids) }
 }

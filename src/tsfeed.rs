@@ -1,7 +1,7 @@
 //! Turning the samples of MPEG-TS files into tracks: times unwrapped and joined across files,
 //! and the sample descriptions made from the parameter sets and ADTS headers.
 
-use crate::codec::{self, Adts, Sps};
+use crate::codec::{self, Adts, Mpa, Sps};
 use crate::demux::{Sample, Track};
 use crate::ts::{self, Es};
 use crate::{bail, Remuxer, Result};
@@ -12,10 +12,13 @@ const CLOCK: i64 = 90_000;
 pub struct TsState {
     /// The streams read, in PMT order, and the track each one became once it had a sample.
     pub pids: Vec<(Es, u16)>,
+    /// HLS packed audio rather than MPEG-TS: one stream, its time in an ID3 tag.
+    pub packed: bool,
     tracks: Vec<Option<usize>>,
     /// Parameter sets of each H.264 stream, by id, as first seen.
     sps: Vec<Vec<(u32, Vec<u8>)>>,
     adts: Vec<Option<Adts>>,
+    mpa: Vec<Option<Mpa>>,
     /// The last time seen, for unwrapping the 33-bit clock.
     last: Option<i64>,
     /// Added to every time, to join files whose clocks jump.
@@ -45,9 +48,15 @@ impl TsState {
 impl Remuxer {
     pub(crate) fn read_ts(&mut self, source: usize, file: u32, data: &[u8]) -> Result<()> {
         if self.sources[source].ts.is_none() {
-            let (pids, skipped) = ts::streams(data)?;
+            let packed = !ts::sniff(data) && ts::sniff_packed(data);
+            let (pids, skipped) = if packed {
+                let Some(es) = ts::packed_kind(data) else { bail!("source {source}: no AAC or MPEG audio frames found") };
+                (vec![(es, 0)], Vec::new())
+            } else {
+                ts::streams(data)?
+            };
             if pids.is_empty() {
-                bail!("source {source}: the first TS file has no H.264 or AAC stream");
+                bail!("source {source}: the first TS file has no H.264, AAC or MPEG audio stream");
             }
             if !skipped.is_empty() {
                 let list: Vec<String> = skipped.iter().map(|t| format!("0x{t:02x}")).collect();
@@ -59,9 +68,11 @@ impl Remuxer {
             let n = pids.len();
             self.sources[source].ts = Some(TsState {
                 pids,
+                packed,
                 tracks: vec![None; n],
                 sps: vec![Vec::new(); n],
                 adts: vec![None; n],
+                mpa: vec![None; n],
                 last: None,
                 offset: 0,
                 next: None,
@@ -78,7 +89,7 @@ impl Remuxer {
     }
 
     fn read_ts_file(&mut self, source: usize, file: u32, data: &[u8], st: &mut TsState) -> Result<()> {
-        let (units, broken) = ts::samples(data, &st.pids)?;
+        let (units, broken) = ts::units(data, &st.pids, st.packed)?;
         if broken > 0 {
             self.warnings.push(format!("file {file}: {broken} damaged TS packets or stray bytes skipped"));
         }
@@ -139,10 +150,12 @@ impl Remuxer {
                 let t = &mut self.tracks[ti];
                 let (dts_t, dur, cto) = match st.pids[i].0 {
                     Es::H264 => (dts, 0u32, (pts - dts) as i32),
-                    Es::Aac => {
-                        let a = u.adts.unwrap();
+                    Es::Aac | Es::Mpa => {
                         let rate = t.timescale as i64;
-                        let frame = 1024 * a.blocks as i64;
+                        let frame = match u.adts {
+                            Some(a) => 1024 * a.blocks as i64,
+                            None => u.mpa.map_or(1152, |m| m.samples) as i64,
+                        };
                         let at = (dts * rate + CLOCK / 2).div_euclid(CLOCK) + u.frame_in_pes as i64 * frame;
                         next = next.max(dts + (u.frame_in_pes as i64 + 1) * frame * CLOCK / rate);
                         (at, frame as u32, 0)
@@ -239,19 +252,37 @@ impl Remuxer {
                     return Some(ti);
                 }
                 st.adts[i] = Some(a);
-                let mut t = Track::blank(source);
-                t.src_id = st.pids[i].1 as u32;
-                t.handler = *b"soun";
-                t.codec = *b"mp4a";
-                t.timescale = a.rate();
-                t.volume = 0x100;
-                t.hdlr = codec::hdlr(b"soun", "SoundHandler");
-                t.media_header = codec::smhd();
-                t.stsd = codec::mp4a_stsd(&a, 0);
-                t.ts_stream = Some(i);
-                Some(self.add_ts_track(i, t, st))
+                Some(self.add_audio_track(source, i, a.rate(), codec::mp4a_stsd(&a, 0), st))
+            }
+            Es::Mpa => {
+                let m = u.mpa?;
+                if let Some(ti) = st.tracks[i] {
+                    if st.mpa[i].is_some_and(|f| !f.same_config(&m)) && !st.warned_adts {
+                        st.warned_adts = true;
+                        self.warnings.push(format!(
+                            "source {source}: the MPEG audio format changes mid-stream; the first one is kept"
+                        ));
+                    }
+                    return Some(ti);
+                }
+                st.mpa[i] = Some(m);
+                Some(self.add_audio_track(source, i, m.rate, codec::mpa_stsd(&m), st))
             }
         }
+    }
+
+    fn add_audio_track(&mut self, source: usize, i: usize, rate: u32, stsd: Vec<u8>, st: &mut TsState) -> usize {
+        let mut t = Track::blank(source);
+        t.src_id = st.pids[i].1 as u32;
+        t.handler = *b"soun";
+        t.codec = *b"mp4a";
+        t.timescale = rate;
+        t.volume = 0x100;
+        t.hdlr = codec::hdlr(b"soun", "SoundHandler");
+        t.media_header = codec::smhd();
+        t.stsd = stsd;
+        t.ts_stream = Some(i);
+        self.add_ts_track(i, t, st)
     }
 
     fn add_ts_track(&mut self, i: usize, t: Track, st: &mut TsState) -> usize {

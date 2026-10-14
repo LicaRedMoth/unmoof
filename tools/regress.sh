@@ -115,5 +115,26 @@ if [ -d $T/synth/ts_plain ]; then
     rm -f $O/ts_*.mp4
 fi
 
+# MPEG audio and HLS packed audio: an .mp3 out of TS or packed segments must be the original
+# file byte for byte; packed AAC is checked against ffmpeg's MP4 of the same frames.
+M=$T/synth/mp3
+if [ -d $M/hls_mp3 ]; then
+    same_file() { # name expected actual
+        if cmp -s "$2" "$3"; then echo "PASS $1"; pass=$((pass + 1)); else echo "FAIL $1 (differs from $2)"; fail=$((fail + 1)); fi
+    }
+    $U -o $O/hls.mp3 -s $(segs $M/hls_mp3/index.m3u8) 2>/dev/null
+    same_file mp3-from-ts $M/truth.mp3 $O/hls.mp3
+    $U -o $O/packed.mp3 -s $(ls -v $M/packed_mp3/*) 2>/dev/null
+    same_file mp3-from-packed $M/truth.mp3 $O/packed.mp3
+    $U -o $O/packed_aac.mp4 -s $(ls -v $M/packed_aac/*) 2>/dev/null
+    ffmpeg -v error -y -i $M/truth.aac -c copy $O/packed_aac_ref.mp4
+    check aac-from-packed $O/packed_aac_ref.mp4 $O/packed_aac.mp4
+    $U -o $O/vid_mp3.mp4 -s $(segs $M/vid_mp3/index.m3u8) 2>/dev/null
+    cat $(segs $M/vid_mp3/index.m3u8) > $O/v.ts
+    ffmpeg -v error -y -i $O/v.ts -c copy $O/vid_mp3_ref.mp4; rm -f $O/v.ts
+    check video-mp3-ts $O/vid_mp3_ref.mp4 $O/vid_mp3.mp4
+    rm -f $O/*.mp3 $O/packed_aac*.mp4 $O/vid_mp3*.mp4
+fi
+
 echo "$pass passed, $fail failed"
 [ $fail -eq 0 ]

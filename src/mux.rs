@@ -59,8 +59,8 @@ pub struct Plan {
     pub header: Vec<u8>,
     /// The `mdat` payload that follows the header, in this order.
     pub pieces: Vec<Piece>,
-    /// The streams of each MPEG-TS source, for [`Plan::render`].
-    ts_streams: Vec<Vec<(Es, u16)>>,
+    /// The streams of each MPEG-TS source and whether it is packed audio, for [`Plan::render`].
+    ts_streams: Vec<(Vec<(Es, u16)>, bool)>,
     /// Size of the whole file.
     pub size: u64,
     pub tracks: Vec<TrackReport>,
@@ -124,8 +124,11 @@ impl Remuxer {
     /// Lays out the progressive file from everything fed so far.
     pub fn finish(self) -> Result<Plan> {
         let chunk_secs = self.chunk_secs.unwrap_or(CHUNK_SECS);
-        let ts_streams: Vec<Vec<(Es, u16)>> =
-            self.sources.iter().map(|s| s.ts.as_ref().map(|t| t.pids.clone()).unwrap_or_default()).collect();
+        let ts_streams: Vec<(Vec<(Es, u16)>, bool)> = self
+            .sources
+            .iter()
+            .map(|s| s.ts.as_ref().map(|t| (t.pids.clone(), t.packed)).unwrap_or_default())
+            .collect();
         let mut warnings = self.warnings;
         let mut tracks = Vec::new();
         let mut snapped = Vec::new();
@@ -307,6 +310,97 @@ impl Remuxer {
     }
 }
 
+/// True if the sample entry is `mp4a` holding MPEG-1 or MPEG-2 audio (object type 0x6b or 0x69).
+fn is_mpeg_audio(t: &Track) -> bool {
+    let Some(at) = t.stsd.windows(4).position(|w| w == b"esds") else { return false };
+    let d = t.stsd.get(at + 8..).unwrap_or(&[]);
+    // A descriptor length takes 1 to 4 bytes, the high bit marking that another follows.
+    let after_len = |mut i: usize| {
+        while d.get(i).is_some_and(|&b| b & 0x80 != 0) {
+            i += 1;
+        }
+        i + 1
+    };
+    if d.first() != Some(&0x03) {
+        return false;
+    }
+    // ES_Descriptor (ISO/IEC 14496-1 7.2.6.5): ES_ID, flags, then the optional fields they name.
+    let mut i = after_len(1) + 2;
+    let Some(&flags) = d.get(i) else { return false };
+    i += 1;
+    if flags & 0x80 != 0 {
+        i += 2;
+    }
+    if flags & 0x40 != 0 {
+        i += 1 + d.get(i).copied().unwrap_or(0) as usize;
+    }
+    if flags & 0x20 != 0 {
+        i += 2;
+    }
+    d.get(i) == Some(&0x04) && matches!(d.get(after_len(i + 1)), Some(0x6b | 0x69))
+}
+
+impl Remuxer {
+    /// Lays out a bare MP3 file: the frames of the one MPEG audio track, in order, with no
+    /// container around them, which is all an `.mp3` file is.
+    pub fn finish_mp3(self) -> Result<Plan> {
+        let ts_streams: Vec<(Vec<(Es, u16)>, bool)> = self
+            .sources
+            .iter()
+            .map(|s| s.ts.as_ref().map(|t| (t.pids.clone(), t.packed)).unwrap_or_default())
+            .collect();
+        let mut warnings = self.warnings;
+        let mut found = None;
+        for t in self.tracks {
+            if t.samples.is_empty() {
+                continue;
+            }
+            if found.is_none() && is_mpeg_audio(&t) {
+                found = Some(t);
+            } else {
+                warnings.push(format!("track {} ({}) is left out of the MP3 file", t.src_id, fourcc(&t.handler)));
+            }
+        }
+        let Some(t) = found else { bail!("no MP3 (MPEG audio) track to write as .mp3") };
+        if t.fixes > 0 {
+            warnings.push("an MP3 file keeps no times: gaps between segments are closed up".into());
+        }
+        let mut pieces: Vec<Piece> = Vec::new();
+        let mut size = 0u64;
+        for s in &t.samples {
+            size += s.size as u64;
+            match (t.ts_stream, pieces.last_mut()) {
+                (None, Some(Piece::Copy(r))) if r.file == s.file && r.offset + r.len == s.off => r.len += s.size as u64,
+                (None, _) => pieces.push(Piece::Copy(Range { file: s.file, offset: s.off, len: s.size as u64 })),
+                (Some(_), Some(Piece::Render { file, len, parts, .. }))
+                    if *file == s.file && parts.last().is_some_and(|&(_, f, n)| f as u64 + n as u64 == s.off) =>
+                {
+                    *len += s.size as u64;
+                    parts.last_mut().unwrap().2 += 1;
+                }
+                (Some(stream), _) => pieces.push(Piece::Render {
+                    file: s.file,
+                    len: s.size as u64,
+                    source: t.source,
+                    parts: vec![(stream, s.off as u32, 1)],
+                }),
+            }
+        }
+        let total: u64 = t.samples.iter().map(|s| s.dur as u64).sum();
+        let report = TrackReport {
+            id: 1,
+            handler: fourcc(&t.handler),
+            codec: "mp3".into(),
+            samples: t.samples.len(),
+            duration: total as f64 / t.timescale as f64,
+            start: 0.0,
+            fixes: t.fixes,
+            snapped: None,
+        };
+        Ok(Plan { header: Vec::new(), pieces, ts_streams, size, tracks: vec![report], warnings })
+    }
+}
+
 impl Plan {
     /// Makes the bytes of a [`Piece::Render`]: its samples, cut out of `data`, the whole TS file
     /// it names, as fed before.
@@ -314,7 +408,8 @@ impl Plan {
         let Some(Piece::Render { len, source, parts, .. }) = self.pieces.get(piece) else {
             bail!("piece {piece} is not a TS piece");
         };
-        let (units, _) = ts::samples(data, &self.ts_streams[*source])?;
+        let (pids, packed) = &self.ts_streams[*source];
+        let (units, _) = ts::units(data, pids, *packed)?;
         let mut out = Vec::with_capacity(*len as usize);
         for &(stream, first, n) in parts {
             let Some(run) = units.get(stream).and_then(|u| u.get(first as usize..(first + n) as usize)) else {

@@ -29,9 +29,9 @@ class Unmoof {
     this.x = x;
   }
 
-  /** 'fmp4', 'ts' or null, judged from the first bytes of a file (64 KiB is plenty). */
+  /** 'fmp4', 'ts', 'packed' (HLS packed audio) or null, judged from the first 64 KiB of a file. */
   sniff(head) {
-    return [null, 'fmp4', 'ts'][this.#with(head, (p, n) => this.x.unmoof_sniff(p, n))];
+    return [null, 'fmp4', 'ts', 'packed'][this.#with(head, (p, n) => this.x.unmoof_sniff(p, n))];
   }
 
   remuxer() {
@@ -105,7 +105,7 @@ class Remuxer {
     this.#check(this.#um.withBytes(bytes, (p, n) => this.#um.x.unmoof_feed(this.#h, source, file, offset, p, n)));
   }
 
-  /** Feeds a whole MPEG-TS file. */
+  /** Feeds a whole MPEG-TS file or HLS packed audio segment. */
   feedTs(source, file, bytes) {
     this.#check(this.#um.withBytes(bytes, (p, n) => this.#um.x.unmoof_feed_ts(this.#h, source, file, p, n)));
   }
@@ -118,11 +118,11 @@ class Remuxer {
   async feedFile(source, file, size, readAt) {
     const head = await readAt(0, Math.min(size, 65536));
     const kind = this.#um.sniff(head);
-    if (kind === 'ts') {
+    if (kind === 'ts' || kind === 'packed') {
       this.feedTs(source, file, size <= head.length ? head : await readAt(0, size));
       return kind;
     }
-    if (kind !== 'fmp4') throw new Error(`unmoof: input file ${file} is neither fMP4 nor MPEG-TS`);
+    if (kind !== 'fmp4') throw new Error(`unmoof: input file ${file} is neither fMP4, MPEG-TS nor packed audio`);
     let pos = 0;
     while (pos < size) {
       const h = await readAt(pos, Math.min(16, size - pos));
@@ -150,6 +150,14 @@ class Remuxer {
   finish() {
     const x = this.#um.x;
     const p = x.unmoof_finish(this.#h);
+    if (p === 0) this.#check(1);
+    return new Plan(this.#um, p);
+  }
+
+  /** Lays out a bare .mp3 file: the frames of the one MP3 track, in order, with no container. */
+  finishMp3() {
+    const x = this.#um.x;
+    const p = x.unmoof_finish_mp3(this.#h);
     if (p === 0) this.#check(1);
     return new Plan(this.#um, p);
   }

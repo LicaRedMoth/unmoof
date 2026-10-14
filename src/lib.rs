@@ -23,6 +23,8 @@ pub enum Format {
     Fmp4,
     /// MPEG-TS packets, possibly behind junk such as a fake image header.
     Ts,
+    /// HLS packed audio: AAC or MPEG audio frames, usually behind an ID3 tag.
+    PackedAudio,
 }
 
 /// Tells fMP4 from MPEG-TS. `head` should be the first few kilobytes of the file, or all of it.
@@ -33,6 +35,8 @@ pub fn sniff(head: &[u8]) -> Option<Format> {
         Some(Format::Fmp4)
     } else if ts::sniff(head) {
         Some(Format::Ts)
+    } else if ts::sniff_packed(head) {
+        Some(Format::PackedAudio)
     } else {
         None
     }
@@ -103,8 +107,8 @@ impl Remuxer {
         self.sources.len() - 1
     }
 
-    /// Reads a whole MPEG-TS file, input file `file`. Its samples are cut out of it again when
-    /// the output is written, through [`Plan::render`].
+    /// Reads a whole MPEG-TS file or HLS packed audio segment, input file `file`. Its samples are
+    /// cut out of it again when the output is written, through [`Plan::render`].
     pub fn feed_ts(&mut self, source: usize, file: u32, data: &[u8]) -> Result<()> {
         if source >= self.sources.len() {
             bail!("source {source} was never opened");

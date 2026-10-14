@@ -38,7 +38,7 @@ unsafe fn bytes<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
     if len == 0 { &[] } else { unsafe { std::slice::from_raw_parts(ptr, len) } }
 }
 
-/// 1 for fMP4, 2 for MPEG-TS, 0 for neither.
+/// 1 for fMP4, 2 for MPEG-TS, 3 for HLS packed audio, 0 for none of them.
 ///
 /// # Safety
 /// `ptr` must point at `len` readable bytes.
@@ -47,6 +47,7 @@ pub unsafe extern "C" fn unmoof_sniff(ptr: *const u8, len: usize) -> u32 {
     match unmoof::sniff(unsafe { bytes(ptr, len) }) {
         Some(Format::Fmp4) => 1,
         Some(Format::Ts) => 2,
+        Some(Format::PackedAudio) => 3,
         None => 0,
     }
 }
@@ -173,6 +174,26 @@ pub unsafe extern "C" fn unmoof_finish(h: *mut RState) -> *mut PState {
         return std::ptr::null_mut();
     };
     match rm.finish() {
+        Ok(plan) => Box::into_raw(Box::new(PState { plan, buf: Vec::new() })),
+        Err(e) => {
+            fail(&mut st.buf, e);
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Like `unmoof_finish`, for a bare `.mp3` file: the frames of the one MP3 track, in order.
+///
+/// # Safety
+/// `h` must come from `unmoof_new`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn unmoof_finish_mp3(h: *mut RState) -> *mut PState {
+    let st = unsafe { &mut *h };
+    let Some(rm) = st.rm.take() else {
+        fail(&mut st.buf, "the remuxer has finished");
+        return std::ptr::null_mut();
+    };
+    match rm.finish_mp3() {
         Ok(plan) => Box::into_raw(Box::new(PState { plan, buf: Vec::new() })),
         Err(e) => {
             fail(&mut st.buf, e);

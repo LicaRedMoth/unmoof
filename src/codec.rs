@@ -296,6 +296,99 @@ impl Adts {
     }
 }
 
+/// The header of an MPEG audio frame (MP1, MP2, MP3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Mpa {
+    /// 1 for MPEG-1, 2 for MPEG-2 and MPEG-2.5.
+    pub version: u8,
+    pub layer: u8,
+    pub rate: u32,
+    pub channels: u8,
+    pub frame_len: usize,
+    /// Samples each frame decodes to.
+    pub samples: u32,
+}
+
+impl Mpa {
+    pub fn parse(b: &[u8]) -> Option<Mpa> {
+        if b.len() < 4 || b[0] != 0xff || b[1] & 0xe0 != 0xe0 {
+            return None;
+        }
+        let ver = (b[1] >> 3) & 3; // 0: 2.5, 2: 2, 3: 1
+        let layer = match (b[1] >> 1) & 3 {
+            3 => 1,
+            2 => 2,
+            1 => 3,
+            _ => return None,
+        };
+        let br_i = (b[2] >> 4) as usize;
+        let sr_i = ((b[2] >> 2) & 3) as usize;
+        if ver == 1 || br_i == 0 || br_i == 15 || sr_i == 3 {
+            return None;
+        }
+        let mpeg1 = ver == 3;
+        let kbps: [u32; 15] = match (mpeg1, layer) {
+            (true, 1) => [0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448],
+            (true, 2) => [0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384],
+            (true, _) => [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320],
+            (false, 1) => [0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256],
+            (false, _) => [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
+        };
+        let rate = [44100, 48000, 32000][sr_i] >> match ver { 3 => 0, 2 => 1, _ => 2 };
+        let bitrate = kbps[br_i] * 1000;
+        let pad = ((b[2] >> 1) & 1) as u32;
+        let (samples, frame_len) = match layer {
+            1 => (384, (12 * bitrate / rate + pad) * 4),
+            2 => (1152, 144 * bitrate / rate + pad),
+            _ if mpeg1 => (1152, 144 * bitrate / rate + pad),
+            _ => (576, 72 * bitrate / rate + pad),
+        };
+        if frame_len < 4 {
+            return None;
+        }
+        Some(Mpa {
+            version: if mpeg1 { 1 } else { 2 },
+            layer,
+            rate,
+            channels: if b[3] >> 6 == 3 { 1 } else { 2 },
+            frame_len: frame_len as usize,
+            samples,
+        })
+    }
+
+    /// Same stream parameters, so the frames can share one sample description.
+    pub fn same_config(&self, o: &Mpa) -> bool {
+        (self.version, self.layer, self.rate, self.channels) == (o.version, o.layer, o.rate, o.channels)
+    }
+}
+
+/// An `stsd` holding one `mp4a` sample entry for MPEG audio: object type 0x6b for MPEG-1,
+/// 0x69 for MPEG-2, and no decoder specific info.
+pub fn mpa_stsd(m: &Mpa) -> Vec<u8> {
+    let mut w = Wr::default();
+    let stsd = w.open_full(b"stsd", 0, 0);
+    w.u32(1);
+    let entry = w.open(b"mp4a");
+    w.zeros(6);
+    w.u16(1);
+    w.zeros(8);
+    w.u16(m.channels as u16);
+    w.u16(16);
+    w.u32(0);
+    w.u32(m.rate << 16);
+    let esds = w.open_full(b"esds", 0, 0);
+    w.bytes(&[0x03, 3 + 2 + 13 + 3]);
+    w.u16(0);
+    w.bytes(&[0, 0x04, 13, if m.version == 1 { 0x6b } else { 0x69 }, 0x15, 0, 0, 0]);
+    w.u32(0);
+    w.u32(0);
+    w.bytes(&[0x06, 1, 2]);
+    w.close(esds);
+    w.close(entry);
+    w.close(stsd);
+    w.v
+}
+
 /// An `stsd` holding one `mp4a` sample entry for the AAC the ADTS headers describe.
 pub fn mp4a_stsd(a: &Adts, es_id: u16) -> Vec<u8> {
     let asc = [
@@ -371,6 +464,13 @@ mod tests {
         let mut out = Vec::new();
         annexb_to_avcc(&au, &mut out);
         assert_eq!(out, [0, 0, 0, 2, 0x09, 0xf0, 0, 0, 0, 6, 0x65, 0x88, 0x84, 0, 0, 0]);
+    }
+
+    #[test]
+    fn mp3_frame() {
+        // MPEG-1 Layer III, 320 kbps, 44.1 kHz, no padding: 1044 bytes, 1152 samples.
+        let m = Mpa::parse(&[0xff, 0xfb, 0xe0, 0x44]).unwrap();
+        assert_eq!((m.version, m.layer, m.rate, m.frame_len, m.samples, m.channels), (1, 3, 44100, 1044, 1152, 2));
     }
 
     #[test]
