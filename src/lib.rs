@@ -79,6 +79,24 @@ impl Remuxer {
         self.chunk_secs = Some(secs);
     }
 
+    /// Names the language (ISO 639-2, such as `rus` or `jpn`) and a title (such as the studio of a
+    /// dub) of every track of a source. Players show them when the tracks are alternatives. DASH
+    /// and HLS keep these in the manifest, where the segments do not carry them.
+    pub fn set_track_info(&mut self, source: usize, language: Option<&str>, title: Option<&str>) -> Result<()> {
+        let Some(s) = self.sources.get_mut(source) else { bail!("source {source} was never opened") };
+        if let Some(lang) = language {
+            let b = lang.as_bytes();
+            if b.len() != 3 || !b.iter().all(u8::is_ascii_lowercase) {
+                bail!("language '{lang}' is not a three-letter ISO 639-2 code such as rus or jpn");
+            }
+            s.language = Some(b.iter().fold(0u16, |v, &c| v << 5 | (c - 0x60) as u16));
+        }
+        if let Some(t) = title {
+            s.title = Some(t.to_string());
+        }
+        Ok(())
+    }
+
     /// Opens a new source and returns its index.
     pub fn add_source(&mut self) -> usize {
         self.sources.push(demux::Source::default());

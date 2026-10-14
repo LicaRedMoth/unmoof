@@ -11,6 +11,9 @@ pub struct Source {
     tracks: Vec<(u32, usize)>,
     /// Set when the source is MPEG-TS.
     pub ts: Option<crate::tsfeed::TsState>,
+    /// Language and title the caller knows from the playlist, for every track of the source.
+    pub language: Option<u16>,
+    pub title: Option<String>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -71,6 +74,8 @@ pub struct Track {
     /// For MPEG-TS input: which stream of the source it is. Its samples are cut out of the TS
     /// files again when the output is written, and `Sample::off` counts samples, not bytes.
     pub ts_stream: Option<usize>,
+    /// A name for players to show, such as the studio of a dub.
+    pub title: Option<String>,
 }
 
 impl Track {
@@ -97,6 +102,7 @@ impl Track {
             next_dts: 0,
             fixes: 0,
             ts_stream: None,
+            title: None,
         }
     }
 

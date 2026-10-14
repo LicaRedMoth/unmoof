@@ -84,6 +84,17 @@ class Remuxer {
     return this.#um.x.unmoof_add_source(this.#h);
   }
 
+  /**
+   * The language (ISO 639-2: 'rus', 'jpn') and title (such as the studio of a dub) of a source's
+   * tracks, which players show. DASH and HLS keep these in the manifest, not in the segments.
+   */
+  setTrackInfo(source, { language = '', title = '' } = {}) {
+    const enc = new TextEncoder(), um = this.#um, x = um.x;
+    const l = enc.encode(language), t = enc.encode(title);
+    this.#check(um.withBytes(l, (lp, ln) => um.withBytes(t, (tp, tn) =>
+      x.unmoof_set_track_info(this.#h, source, lp, ln, tp, tn))));
+  }
+
   /** How long a chunk may run, which is how finely video and audio interleave. */
   setChunkMs(ms) {
     this.#um.x.unmoof_set_chunk_ms(this.#h, ms);

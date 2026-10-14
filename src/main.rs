@@ -13,6 +13,8 @@ usage: unmoof -o OUT.mp4 -s FILE... [-s FILE...]...
   -s FILE...  one source: its init segment followed by its media segments in
               playlist order, or a single fMP4 file. Each stream delivered on
               its own, such as DASH audio, is another -s.
+  --lang L    after -s: the language of that source's tracks (ISO 639-2: rus, jpn)
+  --title T   after -s: a title for them, such as the studio of a dub
   -o OUT      the progressive MP4 to write
   --chunk MS  the longest a chunk may run, in milliseconds (default 500)";
 
@@ -30,11 +32,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut out: Option<PathBuf> = None;
     let mut chunk_ms: Option<f64> = None;
     let mut sources: Vec<Vec<PathBuf>> = Vec::new();
+    let mut infos: Vec<(Option<String>, Option<String>)> = Vec::new();
     let mut args = std::env::args_os().skip(1);
     while let Some(a) = args.next() {
         match a.to_str() {
             Some("-o") => out = Some(args.next().ok_or("-o needs a path")?.into()),
-            Some("-s") => sources.push(Vec::new()),
+            Some("-s") => {
+                sources.push(Vec::new());
+                infos.push((None, None));
+            }
+            Some(flag @ ("--lang" | "--title")) => {
+                let v = args.next().ok_or(format!("{flag} needs a value"))?.to_string_lossy().into_owned();
+                let info = infos.last_mut().ok_or(format!("{flag} must follow -s"))?;
+                if flag == "--lang" { info.0 = Some(v) } else { info.1 = Some(v) }
+            }
             Some("--chunk") => {
                 let v = args.next().ok_or("--chunk needs milliseconds")?;
                 let ms: f64 = v.to_str().and_then(|v| v.parse().ok()).filter(|&ms: &f64| ms > 0.0).ok_or("--chunk needs a positive number of milliseconds")?;
@@ -60,8 +71,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         rm.set_chunk_duration(ms / 1000.0);
     }
     let mut files: Vec<(PathBuf, u64)> = Vec::new();
-    for group in &sources {
+    for (group, (lang, title)) in sources.iter().zip(&infos) {
         let s = rm.add_source();
+        rm.set_track_info(s, lang.as_deref(), title.as_deref())?;
         for path in group {
             let id = files.len() as u32;
             let len = scan(&mut rm, s, id, path).map_err(|e| format!("{}: {e}", path.display()))?;

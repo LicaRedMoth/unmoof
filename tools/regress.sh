@@ -47,6 +47,19 @@ if [ -f $A/media_4.m3u8 ]; then
     rm -f $O/aniboom.mp4 $O/aniboom_ref.mp4
 fi
 
+# Other codecs, and two dubs as two audio sources, cut into DASH by ffmpeg.
+for k in vp9_opus av1_flac dubs; do
+    D=$T/synth/codecs/$k
+    [ -d $D ] || continue
+    args=()
+    for n in 0 1 2; do
+        [ -f $D/init-stream$n.m4s ] && args+=(-s $D/init-stream$n.m4s $(ls -v $D/chunk-stream$n-*))
+    done
+    $U -o $O/$k.mp4 "${args[@]}" 2>/dev/null
+    check "synth-$k" $T/synth/codecs/$k.mp4 $O/$k.mp4
+    rm -f $O/$k.mp4
+done
+
 # Public test streams fetched with tools/fetch.py: one source per src* directory.
 for d in $T/public/*/; do
     k=$(basename "$d")

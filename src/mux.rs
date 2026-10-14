@@ -130,6 +130,14 @@ impl Remuxer {
         let mut tracks = Vec::new();
         let mut snapped = Vec::new();
         for mut t in self.tracks {
+            let src = &self.sources[t.source];
+            if let Some(lang) = src.language {
+                t.language = lang;
+            }
+            if let Some(title) = &src.title {
+                t.hdlr = crate::codec::hdlr(&t.handler, title);
+                t.title = Some(title.clone());
+            }
             if t.samples.is_empty() {
                 warnings.push(format!(
                     "track {} ({}) of source {} has no samples and is left out",
@@ -366,7 +374,20 @@ fn moov(tracks: &[Track], lays: &[Layout], placed: &[Vec<Placed>], base: u64, co
     w.close(at);
 
     for (i, ((t, l), chunks)) in tracks.iter().zip(lays).zip(placed).enumerate() {
-        trak(&mut w, i as u32 + 1, t, l, chunks, base, co64);
+        // Tracks of one kind are alternatives, as dubs are: only the first is enabled, and
+        // they share an alternate group, so no player mixes two dubs or shows two pictures.
+        let same: Vec<usize> = (0..tracks.len()).filter(|&j| tracks[j].handler == t.handler).collect();
+        let enabled = same[0] == i;
+        let group = if same.len() > 1 {
+            match &t.handler {
+                b"soun" => 1,
+                b"vide" => 2,
+                _ => 3,
+            }
+        } else {
+            t.alt_group
+        };
+        trak(&mut w, i as u32 + 1, t, l, chunks, base, co64, enabled, group);
     }
     w.close(moov);
     w.v
@@ -380,19 +401,20 @@ fn dur(w: &mut Wr, v: u8, d: u64) {
     if v == 1 { w.u64(d) } else { w.u32(d as u32) }
 }
 
-fn trak(w: &mut Wr, id: u32, t: &Track, l: &Layout, chunks: &[Placed], base: u64, co64: bool) {
+#[allow(clippy::too_many_arguments)]
+fn trak(w: &mut Wr, id: u32, t: &Track, l: &Layout, chunks: &[Placed], base: u64, co64: bool, enabled: bool, group: i16) {
     let trak = w.open(b"trak");
 
     let track_dur = l.duration(t.timescale);
     let v = (track_dur > u32::MAX as u64) as u8;
-    let at = w.open_full(b"tkhd", v, 3); // enabled, in movie
+    let at = w.open_full(b"tkhd", v, if enabled { 3 } else { 2 }); // enabled, in movie
     times(w, v);
     w.u32(id);
     w.u32(0);
     dur(w, v, track_dur);
     w.zeros(8);
     w.i16(t.layer);
-    w.i16(t.alt_group);
+    w.i16(group);
     let audio = &t.handler == b"soun";
     w.u16(if audio && t.volume == 0 { 0x100 } else if audio { t.volume } else { 0 });
     w.u16(0);
@@ -451,6 +473,16 @@ fn trak(w: &mut Wr, id: u32, t: &Track, l: &Layout, chunks: &[Placed], base: u64
     stbl(w, t, l, chunks, base, co64);
     w.close(minf);
     w.close(mdia);
+    if let Some(title) = &t.title {
+        // The QuickTime title string, which ffmpeg (and so mpv) and Apple players read.
+        let udta = w.open(b"udta");
+        let name = w.open(b"\xa9nam");
+        w.u16(title.len() as u16);
+        w.u16(0x15c7); // the string's language, "eng" packed as ISO 639-2
+        w.bytes(title.as_bytes());
+        w.close(name);
+        w.close(udta);
+    }
     w.close(trak);
 }
 

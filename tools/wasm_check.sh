@@ -42,6 +42,10 @@ if [ -d $S/ts_plain ]; then
     same synth-ts-png -s $(segs $S/ts_png/index.m3u8)
     same synth-ts-wrap -s $(segs $S/ts_wrap/index.m3u8)
     same synth-ts-disc -s $(segs $S/ts_disc/a.m3u8) $(segs $S/ts_disc/b.m3u8)
+    C=$S/codecs/dubs
+    [ -d $C ] && same synth-dubs-titled -s $C/init-stream0.m4s $(ls -v $C/chunk-stream0-*) \
+        -s --lang rus --title AniLibria $C/init-stream1.m4s $(ls -v $C/chunk-stream1-*) \
+        -s --lang jpn --title Оригинал $C/init-stream2.m4s $(ls -v $C/chunk-stream2-*)
 fi
 echo "$pass same, $fail different"
 [ $fail -eq 0 ]

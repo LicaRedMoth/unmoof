@@ -110,6 +110,28 @@ pub unsafe extern "C" fn unmoof_add_source(h: *mut RState) -> u32 {
     unsafe { (*h).rm.as_mut().map_or(u32::MAX, |rm| rm.add_source() as u32) }
 }
 
+/// Names the language (ISO 639-2) and title of a source's tracks; an empty string leaves one as is.
+///
+/// # Safety
+/// `h` must come from `unmoof_new`; the pointers must point at the UTF-8 bytes given.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn unmoof_set_track_info(
+    h: *mut RState,
+    source: u32,
+    lang: *const u8,
+    lang_len: usize,
+    title: *const u8,
+    title_len: usize,
+) -> u32 {
+    let st = unsafe { &mut *h };
+    let Some(rm) = st.rm.as_mut() else { return fail(&mut st.buf, "the remuxer has finished") };
+    let text = |p, n| std::str::from_utf8(unsafe { bytes(p, n) }).ok().filter(|s| !s.is_empty());
+    match rm.set_track_info(source as usize, text(lang, lang_len), text(title, title_len)) {
+        Ok(()) => 0,
+        Err(e) => fail(&mut st.buf, e),
+    }
+}
+
 /// Feeds whole top-level boxes of an fMP4 file; `offset` is where they start in the file.
 ///
 /// # Safety

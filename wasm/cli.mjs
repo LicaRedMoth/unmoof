@@ -8,10 +8,13 @@ import { init } from './unmoof.js';
 const args = process.argv.slice(2);
 let out = null, chunk = null;
 const sources = [];
+const infos = [];
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '-o') out = args[++i];
   else if (args[i] === '--chunk') chunk = Number(args[++i]);
-  else if (args[i] === '-s') sources.push([]);
+  else if (args[i] === '-s') { sources.push([]); infos.push({}); }
+  else if (args[i] === '--lang') infos.at(-1).language = args[++i];
+  else if (args[i] === '--title') infos.at(-1).title = args[++i];
   else if (sources.length) sources.at(-1).push(args[i]);
   else throw new Error(`${args[i]}: a file must follow -s`);
 }
@@ -25,8 +28,9 @@ const um = await init(readFileSync(new URL('./unmoof.wasm', import.meta.url)));
 const rm = um.remuxer();
 if (chunk) rm.setChunkMs(chunk);
 const files = [];
-for (const group of sources) {
+for (const [g, group] of sources.entries()) {
   const s = rm.addSource();
+  rm.setTrackInfo(s, infos[g]);
   for (const path of group) {
     const fd = openSync(path, 'r');
     const size = fstatSync(fd).size;
