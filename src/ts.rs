@@ -387,6 +387,10 @@ fn aac_units(b: &[u8], marks: &[Mark], broken: &mut usize) -> Vec<Unit> {
     let mut p = 0;
     let mut junk = false;
     while p + 7 <= b.len() {
+        if let Some(n) = id3_len(&b[p..]) {
+            p += n;
+            continue;
+        }
         let Some(a) = Adts::parse(&b[p..]) else {
             if !junk {
                 *broken += 1;
@@ -428,6 +432,10 @@ fn mpa_units(b: &[u8], marks: &[Mark], broken: &mut usize) -> Vec<Unit> {
     let mut p = 0;
     let mut junk = false;
     while p + 4 <= b.len() {
+        if let Some(n) = id3_len(&b[p..]) {
+            p += n;
+            continue;
+        }
         let Some(m) = Mpa::parse(&b[p..]) else {
             if !junk {
                 *broken += 1;
@@ -459,6 +467,16 @@ fn mpa_units(b: &[u8], marks: &[Mark], broken: &mut usize) -> Vec<Unit> {
         p += m.frame_len;
     }
     out
+}
+
+/// The length of an ID3v2 tag at the start of `b`. Audio streams carry them as metadata
+/// (an encoder name, a timestamp) between frames.
+fn id3_len(b: &[u8]) -> Option<usize> {
+    if b.len() < 10 || &b[..3] != b"ID3" || b[6..10].iter().any(|&x| x & 0x80 != 0) {
+        return None;
+    }
+    let size = b[6..10].iter().fold(0usize, |v, &x| v << 7 | x as usize);
+    Some(10 + size + if b[5] & 0x10 != 0 { 10 } else { 0 })
 }
 
 /// True if `b` starts like an HLS packed audio segment: an ID3 tag, or bare ADTS or MPEG audio.

@@ -91,7 +91,7 @@ impl Remuxer {
     fn read_ts_file(&mut self, source: usize, file: u32, data: &[u8], st: &mut TsState) -> Result<()> {
         let (units, broken) = ts::units(data, &st.pids, st.packed)?;
         if broken > 0 {
-            self.warnings.push(format!("file {file}: {broken} damaged TS packets or stray bytes skipped"));
+            self.warnings.push(format!("file {file}: skipped {broken} damaged TS packets or stretches of bytes that are not frames"));
         }
 
         // A file whose clock does not go on from where the last one ended starts a new stretch

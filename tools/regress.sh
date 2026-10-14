@@ -136,5 +136,15 @@ if [ -d $M/hls_mp3 ]; then
     rm -f $O/*.mp3 $O/packed_aac*.mp4 $O/vid_mp3*.mp4
 fi
 
+# A real VK track (the user's own upload): HLS, MP3 320 in TS, AES-128 segments already
+# decrypted by the fetch, with an ID3 tag inside the audio stream.
+if [ -f $T/vk/seg-00.ts ]; then
+    $U -o $O/vk.mp3 -s $(ls -v $T/vk/seg-*.ts) 2>/dev/null
+    cat $(ls -v $T/vk/seg-*.ts) > $O/vk.ts
+    ffmpeg -v error -y -i $O/vk.ts -c copy $O/vk_ref.mp3 2>/dev/null; rm -f $O/vk.ts
+    check vk-mp3 $O/vk_ref.mp3 $O/vk.mp3
+    rm -f $O/vk.mp3 $O/vk_ref.mp3
+fi
+
 echo "$pass passed, $fail failed"
 [ $fail -eq 0 ]
