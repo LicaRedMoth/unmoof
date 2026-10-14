@@ -1,0 +1,7 @@
+/target
+/wasm/target
+/wasm/unmoof.wasm
+/testdata
+/out
+*.mp4
+*.part

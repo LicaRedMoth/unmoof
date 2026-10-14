@@ -1,0 +1,19 @@
+[package]
+name = "unmoof"
+version = "0.1.0"
+edition = "2024"
+description = "Rebuilds fragmented MP4 (HLS/DASH fMP4) as a progressive MP4 with the moov first, without copying sample data"
+license = "MIT"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "unmoof"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

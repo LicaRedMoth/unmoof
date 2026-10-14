@@ -1,0 +1,20 @@
+[package]
+name = "unmoof-wasm"
+version = "0.1.0"
+edition = "2024"
+description = "unmoof as a WebAssembly module with a C-style API, for browsers and Node"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+unmoof = { path = ".." }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
