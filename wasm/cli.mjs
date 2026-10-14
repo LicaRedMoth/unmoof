@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // The unmoof command again, on unmoof.wasm under Node: the same arguments and the same file,
 // so the module can be checked against the native build byte for byte.
-//   node cli.mjs -o OUT.mp4 -s FILE... [-s FILE...]... [--chunk MS]
+//   node cli.mjs -o OUT.mp4|OUT.mp3 -s [--lang L] [--title T] FILE... [-s ...]... [--chunk MS]
 import { openSync, readSync, fstatSync, writeSync, closeSync, readFileSync, renameSync } from 'node:fs';
 import { init } from './unmoof.js';
 

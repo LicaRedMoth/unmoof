@@ -1,4 +1,4 @@
-//! The unmoof command: fMP4 segments in, one progressive MP4 out.
+//! The unmoof command: the segments of a stream in, one MP4 or .mp3 out.
 
 use std::fs::File;
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
@@ -102,8 +102,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Hands the `moov` and `moof` boxes of an fMP4 file to the remuxer and skips everything else;
-/// hands an MPEG-TS file over whole.
+/// Hands the `moov` and `moof` boxes of an fMP4 file to the remuxer; other kinds go whole.
 fn scan(rm: &mut Remuxer, source: usize, id: u32, path: &PathBuf) -> Result<u64, Box<dyn std::error::Error>> {
     let mut f = File::open(path)?;
     let len = f.metadata()?.len();

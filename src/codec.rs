@@ -1,5 +1,5 @@
-//! What MPEG-TS input needs from the codecs: H.264 in Annex B made length-prefixed, its SPS read
-//! for the picture size, AAC freed of its ADTS headers, and the sample entries an MP4 needs.
+//! What TS input needs from the codecs: H.264 made length-prefixed and its SPS read, AAC and
+//! MPEG audio frame headers, and the sample entries an MP4 needs for them.
 
 use crate::bytes::Wr;
 

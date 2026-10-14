@@ -1,11 +1,10 @@
-//! unmoof rebuilds fragmented MP4 (the fMP4 of HLS and DASH) as a progressive MP4 with the
-//! `moov` first, the layout Telegram, Android and every other player can seek in.
+//! unmoof turns the segments of an HLS or DASH stream (fMP4, MPEG-TS, packed audio, subtitles)
+//! into one MP4 with the `moov` first, the layout every player can seek and stream, or into a
+//! bare `.mp3`.
 //!
-//! Sample data is never copied or changed. The caller hands over the `moov` and `moof` boxes
-//! of its files, and gets back a [`Plan`]: a header (`ftyp`, `moov`, `mdat` header) and the
-//! byte ranges of the inputs that follow it. Writing the header and then the ranges, in order,
-//! gives the file. In a browser the ranges become `Blob.slice` calls on files that never have
-//! to be read into memory.
+//! The result is a [`Plan`]: a header, then pieces that are byte ranges of the inputs, samples to
+//! cut out of a TS file ([`Plan::render`]), or bytes made here. fMP4 samples are never copied
+//! into memory, so in a browser most of the file is `Blob.slice` calls on files on disk.
 
 mod bytes;
 mod codec;
@@ -30,7 +29,7 @@ pub enum Format {
     Subtitles,
 }
 
-/// Tells fMP4 from MPEG-TS. `head` should be the first few kilobytes of the file, or all of it.
+/// Tells what kind of input a file is. `head` should be its first 64 KiB, or all of it.
 pub fn sniff(head: &[u8]) -> Option<Format> {
     const BOXES: [&[u8; 4]; 11] =
         [b"ftyp", b"styp", b"moov", b"moof", b"sidx", b"free", b"skip", b"emsg", b"prft", b"mdat", b"uuid"];
@@ -67,9 +66,9 @@ pub(crate) use bail;
 
 /// Collects the tracks and samples of one or more sources, then lays out the progressive file.
 ///
-/// A source is one fMP4 stream: its init segment followed by its media segments, in any number
-/// of files. A stream whose audio is delivered separately, as DASH and some HLS do, is two
-/// sources. Their track IDs may clash; the output numbers its tracks itself.
+/// A source is one stream in any number of files: an fMP4 init segment and its media segments,
+/// TS segments, packed audio or subtitles. Audio delivered on its own, as in DASH, is another
+/// source. Track IDs of sources may clash; the output numbers its tracks itself.
 #[derive(Default)]
 pub struct Remuxer {
     sources: Vec<demux::Source>,
@@ -88,9 +87,8 @@ impl Remuxer {
         self.chunk_secs = Some(secs);
     }
 
-    /// Names the language (ISO 639-2, such as `rus` or `jpn`) and a title (such as the studio of a
-    /// dub) of every track of a source. Players show them when the tracks are alternatives. DASH
-    /// and HLS keep these in the manifest, where the segments do not carry them.
+    /// Names the language (ISO 639-2: `rus`, `jpn`) and a title (the studio of a dub) of a
+    /// source's tracks. Manifests carry these; segments do not.
     pub fn set_track_info(&mut self, source: usize, language: Option<&str>, title: Option<&str>) -> Result<()> {
         let Some(s) = self.sources.get_mut(source) else { bail!("source {source} was never opened") };
         if let Some(lang) = language {

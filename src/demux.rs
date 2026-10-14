@@ -126,15 +126,9 @@ impl Track {
         &self.handler == b"soun"
     }
 
-    /// Puts the frames of a fixed-frame audio codec back on their grid.
-    ///
-    /// Packagers that came from MPEG-TS often stamp AAC frames with rounded times, so the
-    /// durations wobble around the frame length (1890 to 2025 ticks instead of 1920). Players
-    /// that decode frame after frame do not care; VLC trusts the times and stutters. The frames
-    /// still last exactly one frame length each, so the grid is the true timeline. A step of
-    /// more than half a frame away from it is a real gap and starts a new grid.
-    ///
-    /// Returns the largest correction in seconds, or `None` if the track was left alone.
+    /// Puts the frames of a fixed-frame audio codec back on their grid: packagers that came from
+    /// MPEG-TS round frame times, and strict players stutter on the wobble. A step of more than
+    /// half a frame is a real gap. Returns the largest correction in seconds, if any.
     pub fn snap_audio(&mut self) -> Option<f64> {
         if !self.is_audio() || !matches!(&self.codec, b"mp4a" | b"ac-3" | b"ec-3") || self.samples.len() < 2 {
             return None;

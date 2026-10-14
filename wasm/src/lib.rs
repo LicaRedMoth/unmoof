@@ -148,7 +148,7 @@ pub unsafe extern "C" fn unmoof_feed(h: *mut RState, source: u32, file: u32, off
     }
 }
 
-/// Feeds a whole MPEG-TS file.
+/// Feeds a whole MPEG-TS file or HLS packed audio segment.
 ///
 /// # Safety
 /// `h` must come from `unmoof_new`; `ptr` must point at `len` readable bytes.

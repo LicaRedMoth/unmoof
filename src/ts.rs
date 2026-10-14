@@ -1,11 +1,8 @@
-//! MPEG-TS input: HLS segments carrying H.264, AAC and MPEG audio, and HLS packed audio (bare
-//! AAC or MP3 frames behind an ID3 tag that holds the time).
+//! MPEG-TS input (H.264, AAC, MPEG audio) and HLS packed audio (bare frames behind an ID3 tag).
 //!
-//! Unlike fMP4, the samples of a TS file are scattered over 188-byte packets and wrapped in
-//! Annex B start codes or ADTS headers, so they cannot be copied as they lie. A TS file is read
-//! twice: once when it is fed, for the sample tables, and once more when the output is written,
-//! to cut its samples out ([`crate::Plan::render`]). Both readings go through [`samples`], so
-//! they agree on every sample. Nothing is kept between them but the tables.
+//! TS samples lie scattered over 188-byte packets, so a file is read twice: once for the sample
+//! tables, once more to cut the samples out ([`crate::Plan::render`]). Both readings go through
+//! [`units`], so they agree on every sample.
 
 use crate::codec::{self, Adts, Mpa};
 use crate::{bail, Result};
@@ -263,13 +260,9 @@ pub fn streams(b: &[u8]) -> Result<(Vec<(Es, u16)>, Vec<u8>)> {
     Ok((read, skipped))
 }
 
-/// The samples of every stream of `pids` in a TS file, per stream, in decode order.
-/// `pids` also stands in for a PMT the file may lack.
-///
-/// The PES of a stream are joined into one elementary stream first and cut into samples after,
-/// because a PES need not start or end on a frame: old Apple segmenters cut video and audio
-/// anywhere. A PES time belongs to the first frame that starts inside that PES (ISO/IEC
-/// 13818-1, 2.4.3.7); later frames of it have none, and AAC frames count on from it.
+/// The samples of every stream of `pids` in a TS file, per stream, in decode order; `pids` also
+/// stands in for a missing PMT. A PES need not start on a frame (old Apple segmenters cut
+/// anywhere), so the PES are joined first; a PES time belongs to the first frame starting in it.
 pub fn samples(b: &[u8], pids: &[(Es, u16)]) -> Result<(Vec<Vec<Unit>>, usize)> {
     let known: Vec<(u8, u16)> = pids.iter().map(|&(e, pid)| (e.stream_type(), pid)).collect();
     let d = read_ts(b, &known)?;

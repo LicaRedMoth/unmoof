@@ -1,5 +1,5 @@
-//! Turning the samples of MPEG-TS files into tracks: times unwrapped and joined across files,
-//! and the sample descriptions made from the parameter sets and ADTS headers.
+//! Turning the samples of TS files and packed audio into tracks: times unwrapped and joined
+//! across files, sample descriptions made from parameter sets and frame headers.
 
 use crate::codec::{self, Adts, Mpa, Sps};
 use crate::demux::{Sample, Track};
@@ -94,9 +94,8 @@ impl Remuxer {
             self.warnings.push(format!("file {file}: skipped {broken} damaged TS packets or stretches of bytes that are not frames"));
         }
 
-        // A file whose clock does not go on from where the last one ended starts a new stretch
-        // of timeline (an HLS discontinuity, or a missing segment); it is joined on, so that it
-        // is shown right after the last frame shown before it.
+        // A clock that does not go on from the last file (a discontinuity, a missing segment)
+        // is shifted so the file shows right after the last frame shown.
         let times: Vec<(i64, i64)> = units
             .iter()
             .filter_map(|u| u.iter().find_map(|u| u.dts.map(|d| (u.pts.unwrap_or(d), d))))
