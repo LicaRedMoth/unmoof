@@ -4,7 +4,7 @@
 use crate::codec::{self, Adts, Mpa, Sps};
 use crate::demux::{Sample, Track};
 use crate::ts::{self, Es};
-use crate::{bail, Remuxer, Result};
+use crate::{Remuxer, Result, bail};
 
 const WRAP: i64 = 1 << 33;
 const CLOCK: i64 = 90_000;
@@ -50,7 +50,9 @@ impl Remuxer {
         if self.sources[source].ts.is_none() {
             let packed = !ts::sniff(data) && ts::sniff_packed(data);
             let (pids, skipped) = if packed {
-                let Some(es) = ts::packed_kind(data) else { bail!("source {source}: no AAC or MPEG audio frames found") };
+                let Some(es) = ts::packed_kind(data) else {
+                    bail!("source {source}: no AAC or MPEG audio frames found")
+                };
                 (vec![(es, 0)], Vec::new())
             } else {
                 ts::streams(data)?
@@ -91,7 +93,9 @@ impl Remuxer {
     fn read_ts_file(&mut self, source: usize, file: u32, data: &[u8], st: &mut TsState) -> Result<()> {
         let (units, broken) = ts::units(data, &st.pids, st.packed)?;
         if broken > 0 {
-            self.warnings.push(format!("file {file}: skipped {broken} damaged TS packets or stretches of bytes that are not frames"));
+            self.warnings.push(format!(
+                "file {file}: skipped {broken} damaged TS packets or stretches of bytes that are not frames"
+            ));
         }
 
         // A clock that does not go on from the last file (a discontinuity, a missing segment)
@@ -113,10 +117,10 @@ impl Remuxer {
                 // Decoding must still go forward: a file starting on a reordered frame may need
                 // a little more room.
                 let first_dts = times.iter().map(|&(_, d)| d).min().unwrap() + st.offset;
-                if let Some(last) = st.last_dts {
-                    if first_dts <= last {
-                        st.offset += last - first_dts + 1;
-                    }
+                if let Some(last) = st.last_dts
+                    && first_dts <= last
+                {
+                    st.offset += last - first_dts + 1;
                 }
             }
         }
@@ -148,7 +152,9 @@ impl Remuxer {
                 };
                 let t = &mut self.tracks[ti];
                 let (dts_t, dur, cto) = match st.pids[i].0 {
-                    Es::H264 => (dts, 0u32, (pts - dts) as i32),
+                    Es::H264 => {
+                        (dts, 0u32, (pts - dts).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32)
+                    }
                     Es::Aac | Es::Mpa => {
                         let rate = t.timescale as i64;
                         let frame = match u.adts {
@@ -225,14 +231,16 @@ impl Remuxer {
                 }
                 spss.dedup();
                 ppss.dedup();
-                st.sps[i] = spss.iter().filter_map(|s| codec::parse_sps(s).map(|p| (p.id, s.clone()))).collect();
+                st.sps[i] =
+                    spss.iter().filter_map(|s| codec::parse_sps(s).map(|p| (p.id, s.clone()))).collect();
                 let mut t = Track::blank(source);
                 t.src_id = st.pids[i].1 as u32;
                 t.handler = *b"vide";
                 t.codec = *b"avc1";
                 t.timescale = CLOCK as u32;
-                t.width = ((sps.width as u64 * sps.sar.0 as u64 / sps.sar.1 as u64) as u32) << 16;
-                t.height = sps.height << 16;
+                let shown = u64::from(sps.width) * u64::from(sps.sar.0) / u64::from(sps.sar.1);
+                t.width = (shown.min(0xffff) as u32) << 16;
+                t.height = sps.height.min(0xffff) << 16;
                 t.hdlr = codec::hdlr(b"vide", "VideoHandler");
                 t.media_header = codec::vmhd();
                 t.stsd = codec::avc1_stsd(&spss, &ppss, &sps);
@@ -270,7 +278,14 @@ impl Remuxer {
         }
     }
 
-    fn add_audio_track(&mut self, source: usize, i: usize, rate: u32, stsd: Vec<u8>, st: &mut TsState) -> usize {
+    fn add_audio_track(
+        &mut self,
+        source: usize,
+        i: usize,
+        rate: u32,
+        stsd: Vec<u8>,
+        st: &mut TsState,
+    ) -> usize {
         let mut t = Track::blank(source);
         t.src_id = st.pids[i].1 as u32;
         t.handler = *b"soun";

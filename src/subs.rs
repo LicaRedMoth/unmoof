@@ -2,8 +2,11 @@
 //! (`tx3g`) track, the text track MP4 players show. Bold, italic and underline survive; ASS
 //! positions, colours and effects cannot be carried and are dropped.
 
+use std::cmp::Reverse;
+use std::collections::{BTreeSet, BinaryHeap};
+
 use crate::bytes::Wr;
-use crate::{bail, Result};
+use crate::{Result, bail};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -75,8 +78,12 @@ impl Styled {
             r.1 = r.1.min(self.chars);
         }
         self.runs.retain(|r| r.0 < r.1);
-        (end > start && !self.text.trim().is_empty())
-            .then_some(Cue { start, end, text: self.text, styles: self.runs })
+        (end > start && !self.text.trim().is_empty()).then_some(Cue {
+            start,
+            end,
+            text: self.text,
+            styles: self.runs,
+        })
     }
 }
 
@@ -89,25 +96,35 @@ fn markup(lines: &[&str], start: i64, end: i64) -> Option<Cue> {
             s.push('\n');
         }
         let mut rest = *line;
+        // Once a line has no closing `>` or `}` left, no later `<` or `{` opens a tag: not
+        // searching again keeps a line of brackets from taking quadratic time.
+        let (mut angle, mut brace) = (true, true);
         while !rest.is_empty() {
-            if rest.starts_with('<') {
-                if let Some(close) = rest.find('>') {
-                    let tag = rest[1..close].trim().to_ascii_lowercase();
-                    let (off, name) = match tag.strip_prefix('/') {
-                        Some(t) => (true, t.to_string()),
-                        None => (false, tag.split(|c: char| c == ' ' || c == '.').next().unwrap_or("").to_string()),
-                    };
-                    match name.as_str() {
-                        "b" => s.set(1, !off),
-                        "i" => s.set(2, !off),
-                        "u" => s.set(4, !off),
-                        _ => {}
-                    }
-                    rest = &rest[close + 1..];
-                    continue;
-                }
+            if angle && rest.starts_with('<') && rest.find('>').is_none() {
+                angle = false;
             }
-            if rest.starts_with('{') {
+            if brace && rest.starts_with('{') && rest.find('}').is_none() {
+                brace = false;
+            }
+            if angle
+                && rest.starts_with('<')
+                && let Some(close) = rest.find('>')
+            {
+                let tag = rest[1..close].trim().to_ascii_lowercase();
+                let (off, name) = match tag.strip_prefix('/') {
+                    Some(t) => (true, t.to_string()),
+                    None => (false, tag.split([' ', '.']).next().unwrap_or("").to_string()),
+                };
+                match name.as_str() {
+                    "b" => s.set(1, !off),
+                    "i" => s.set(2, !off),
+                    "u" => s.set(4, !off),
+                    _ => {}
+                }
+                rest = &rest[close + 1..];
+                continue;
+            }
+            if brace && rest.starts_with('{') {
                 // ASS override tags that some SubRip files carry, like {\an8}.
                 if let Some(close) = rest.find('}') {
                     rest = &rest[close + 1..];
@@ -115,7 +132,14 @@ fn markup(lines: &[&str], start: i64, end: i64) -> Option<Cue> {
                 }
             }
             if rest.starts_with('&') {
-                let ents = [("&amp;", '&'), ("&lt;", '<'), ("&gt;", '>'), ("&nbsp;", '\u{a0}'), ("&lrm;", '\u{200e}'), ("&rlm;", '\u{200f}')];
+                let ents = [
+                    ("&amp;", '&'),
+                    ("&lt;", '<'),
+                    ("&gt;", '>'),
+                    ("&nbsp;", '\u{a0}'),
+                    ("&lrm;", '\u{200e}'),
+                    ("&rlm;", '\u{200f}'),
+                ];
                 if let Some((e, c)) = ents.iter().find(|(e, _)| rest.starts_with(e)) {
                     s.push(*c);
                     rest = &rest[e.len()..];
@@ -136,7 +160,7 @@ fn clock(t: &str) -> Option<i64> {
     let (hms, frac) = t.split_once('.').unwrap_or((&t, "0"));
     let mut v = 0i64;
     for part in hms.split(':') {
-        v = v * 60 + part.trim().parse::<i64>().ok()?;
+        v = v.checked_mul(60)?.checked_add(part.trim().parse::<i64>().ok()?)?;
     }
     let digits: String = frac.chars().take_while(char::is_ascii_digit).collect();
     let ms = match digits.len() {
@@ -145,7 +169,7 @@ fn clock(t: &str) -> Option<i64> {
         2 => digits.parse::<i64>().ok()? * 10,
         _ => digits[..3].parse::<i64>().ok()?,
     };
-    Some(v * 1000 + ms)
+    v.checked_mul(1000)?.checked_add(ms)
 }
 
 fn timing(line: &str) -> Option<(i64, i64)> {
@@ -165,7 +189,7 @@ fn blocks(text: &str, offset: i64) -> Vec<Cue> {
             while j < lines.len() && !lines[j].trim().is_empty() {
                 j += 1;
             }
-            out.extend(markup(&lines[i + 1..j], a + offset, b + offset));
+            out.extend(markup(&lines[i + 1..j], a.saturating_add(offset), b.saturating_add(offset)));
             i = j;
         } else {
             i += 1;
@@ -219,11 +243,17 @@ fn ass(text: &str) -> Vec<Cue> {
         }
         let Some(d) = line.strip_prefix("Dialogue:") else { continue };
         if fields.is_empty() {
-            fields = "layer,start,end,style,name,marginl,marginr,marginv,effect,text".split(',').map(String::from).collect();
+            fields = "layer,start,end,style,name,marginl,marginr,marginv,effect,text"
+                .split(',')
+                .map(String::from)
+                .collect();
         }
         let parts: Vec<&str> = d.splitn(fields.len(), ',').collect();
-        let field = |name: &str| fields.iter().position(|f| f == name).and_then(|i| parts.get(i)).map(|s| s.trim());
-        let (Some(a), Some(b), Some(t)) = (field("start"), field("end"), fields.last().and_then(|_| parts.last())) else {
+        let field =
+            |name: &str| fields.iter().position(|f| f == name).and_then(|i| parts.get(i)).map(|s| s.trim());
+        let (Some(a), Some(b), Some(t)) =
+            (field("start"), field("end"), fields.last().and_then(|_| parts.last()))
+        else {
             continue;
         };
         let (Some(a), Some(b)) = (clock(a), clock(b)) else { continue };
@@ -232,16 +262,23 @@ fn ass(text: &str) -> Vec<Cue> {
         let mut rest = *t;
         while !rest.is_empty() {
             if rest.starts_with('{') {
-                let close = rest.find('}').unwrap_or(rest.len() - 1);
+                // An override block left open runs to the end of the line.
+                let close = rest.find('}').unwrap_or(rest.len());
                 for tag in rest[1..close].split('\\').filter(|x| !x.is_empty()) {
                     let on = |v: &str| v.chars().next().is_some_and(|c| c != '0');
-                    if let Some(v) = tag.strip_prefix('b').filter(|v| v.chars().all(|c| c.is_ascii_digit()) && !v.is_empty()) {
+                    if let Some(v) = tag
+                        .strip_prefix('b')
+                        .filter(|v| v.chars().all(|c| c.is_ascii_digit()) && !v.is_empty())
+                    {
                         s.set(1, on(v));
                     } else if let Some(v) = tag.strip_prefix('i').filter(|v| v.len() == 1) {
                         s.set(2, on(v));
                     } else if let Some(v) = tag.strip_prefix('u').filter(|v| v.len() == 1) {
                         s.set(4, on(v));
-                    } else if let Some(v) = tag.strip_prefix('p').filter(|v| v.chars().all(|c| c.is_ascii_digit()) && !v.is_empty()) {
+                    } else if let Some(v) = tag
+                        .strip_prefix('p')
+                        .filter(|v| v.chars().all(|c| c.is_ascii_digit()) && !v.is_empty())
+                    {
                         drawing = on(v);
                     } else if tag == "r" {
                         s.face = 0;
@@ -299,21 +336,57 @@ pub fn samples(cues: &[Cue], from: i64) -> Vec<(i64, u32, Vec<u8>)> {
     edges.push(from);
     edges.sort_unstable();
     edges.dedup();
+    let mut by_start: Vec<&Cue> = cues.iter().collect();
+    by_start.sort_by_key(|c| c.start);
+    // A sweep over the edges: each cue joins the set of shown cues once and leaves it once, so
+    // even tens of thousands of overlapping cues take n log n.
+    let mut next = 0;
+    let mut active: BTreeSet<usize> = BTreeSet::new();
+    let mut ends: BinaryHeap<Reverse<(i64, usize)>> = BinaryHeap::new();
     let mut out: Vec<(i64, u32, Vec<u8>)> = Vec::new();
     for w in edges.windows(2) {
         let (a, b) = (w[0], w[1]);
+        while next < by_start.len() && by_start[next].start <= a {
+            if by_start[next].end > a {
+                active.insert(next);
+                ends.push(Reverse((by_start[next].end, next)));
+            }
+            next += 1;
+        }
+        while let Some(&Reverse((end, i))) = ends.peek() {
+            if end > a {
+                break;
+            }
+            ends.pop();
+            active.remove(&i);
+        }
         let mut text = String::new();
-        let mut chars = 0u16;
-        let mut styles = Vec::new();
-        for c in cues.iter().filter(|c| c.start <= a && a < c.end) {
+        let mut chars = 0u32;
+        let mut styles: Vec<(u32, u32, u8)> = Vec::new();
+        // No screen holds more than a few dozen lines; past that a file is damaged or hostile.
+        for c in active.iter().take(32).map(|&i| by_start[i]) {
             if !text.is_empty() {
                 text.push('\n');
                 chars += 1;
             }
-            styles.extend(c.styles.iter().map(|&(s, e, f)| (s + chars, e + chars, f)));
+            styles.extend(c.styles.iter().map(|&(s, e, f)| (u32::from(s) + chars, u32::from(e) + chars, f)));
             text.push_str(&c.text);
-            chars += c.text.chars().count() as u16;
+            chars += c.text.chars().count() as u32;
         }
+        // A sample states its text length in 16 bits.
+        if text.len() > usize::from(u16::MAX) {
+            let mut cut = usize::from(u16::MAX);
+            while !text.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            text.truncate(cut);
+            chars = text.chars().count() as u32;
+        }
+        let styles: Vec<(u16, u16, u8)> = styles
+            .into_iter()
+            .filter(|&(s, _, _)| s < chars)
+            .map(|(s, e, f)| (s as u16, e.min(chars) as u16, f))
+            .collect();
         let mut w = Wr::default();
         w.u16(text.len() as u16);
         w.bytes(text.as_bytes());
@@ -331,8 +404,10 @@ pub fn samples(cues: &[Cue], from: i64) -> Vec<(i64, u32, Vec<u8>)> {
         }
         // Back-to-back empty samples merge, so a gap is one empty sample however many cues end.
         match out.last_mut() {
-            Some((_, dur, prev)) if text.is_empty() && prev.len() == 2 => *dur += (b - a) as u32,
-            _ => out.push((a, (b - a) as u32, w.v)),
+            Some((_, dur, prev)) if text.is_empty() && prev.len() == 2 => {
+                *dur = dur.saturating_add((b - a).min(i64::from(u32::MAX)) as u32);
+            }
+            _ => out.push((a, (b - a).min(i64::from(u32::MAX)) as u32, w.v)),
         }
     }
     out
@@ -372,9 +447,13 @@ mod tests {
 
     #[test]
     fn srt_with_italics() {
-        let (k, cues, tied) = parse("1\n00:00:01,000 --> 00:00:02,500\nПривет, <i>мир</i>\n".as_bytes()).unwrap();
+        let (k, cues, tied) =
+            parse("1\n00:00:01,000 --> 00:00:02,500\nПривет, <i>мир</i>\n".as_bytes()).unwrap();
         assert_eq!((k, tied), (Kind::Srt, false));
-        assert_eq!(cues[0], Cue { start: 1000, end: 2500, text: "Привет, мир".into(), styles: vec![(8, 11, 2)] });
+        assert_eq!(
+            cues[0],
+            Cue { start: 1000, end: 2500, text: "Привет, мир".into(), styles: vec![(8, 11, 2)] }
+        );
     }
 
     #[test]
@@ -400,7 +479,8 @@ mod tests {
     fn overlapping_cues_share_the_screen() {
         let c = |s, e, t: &str| Cue { start: s, end: e, text: t.into(), styles: vec![] };
         let out = samples(&[c(0, 2000, "a"), c(1000, 3000, "b")], 0);
-        let texts: Vec<_> = out.iter().map(|(s, d, b)| (*s, *d, String::from_utf8_lossy(&b[2..]).into_owned())).collect();
+        let texts: Vec<_> =
+            out.iter().map(|(s, d, b)| (*s, *d, String::from_utf8_lossy(&b[2..]).into_owned())).collect();
         assert_eq!(texts, vec![(0, 1000, "a".into()), (1000, 1000, "a\nb".into()), (2000, 1000, "b".into())]);
     }
 }

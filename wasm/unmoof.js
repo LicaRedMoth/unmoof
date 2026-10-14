@@ -122,6 +122,7 @@ class Remuxer {
    * Returns the kind of file, as `sniff` names it.
    */
   async feedFile(source, file, size, readAt) {
+    this.#um.x.unmoof_set_file_size(this.#h, file, size);
     const head = await readAt(0, Math.min(size, 65536));
     const kind = this.#um.sniff(head);
     if (kind === 'subtitles') {

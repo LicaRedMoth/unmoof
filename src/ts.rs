@@ -5,7 +5,7 @@
 //! [`units`], so they agree on every sample.
 
 use crate::codec::{self, Adts, Mpa};
-use crate::{bail, Result};
+use crate::{Result, bail};
 
 /// Stream types read from the PMT.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -252,11 +252,15 @@ fn parse_pes(pid: u16, b: &[u8]) -> Option<Pes> {
     Some(Pes { pid, pts, dts, payload: b[hdr..end].to_vec() })
 }
 
-/// The program's streams that unmoof reads, in PMT order, and those it leaves out.
-pub fn streams(b: &[u8]) -> Result<(Vec<(Es, u16)>, Vec<u8>)> {
+/// Streams by kind and PID.
+pub type Pids = Vec<(Es, u16)>;
+
+/// The program's streams that unmoof reads, in PMT order, and the types of those it leaves out.
+pub fn streams(b: &[u8]) -> Result<(Pids, Vec<u8>)> {
     let d = read_ts(b, &[])?;
     let read = d.streams.iter().filter_map(|&(t, pid)| Es::from_stream_type(t).map(|e| (e, pid))).collect();
-    let skipped = d.streams.iter().filter(|(t, _)| Es::from_stream_type(*t).is_none()).map(|(t, _)| *t).collect();
+    let skipped =
+        d.streams.iter().filter(|(t, _)| Es::from_stream_type(*t).is_none()).map(|(t, _)| *t).collect();
     Ok((read, skipped))
 }
 

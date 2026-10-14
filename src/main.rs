@@ -2,7 +2,7 @@
 
 use std::fs::File;
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use unmoof::{Error, Format, Piece, Plan, Remuxer};
@@ -48,7 +48,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             Some("--chunk") => {
                 let v = args.next().ok_or("--chunk needs milliseconds")?;
-                let ms: f64 = v.to_str().and_then(|v| v.parse().ok()).filter(|&ms: &f64| ms > 0.0).ok_or("--chunk needs a positive number of milliseconds")?;
+                let ms: f64 = v
+                    .to_str()
+                    .and_then(|v| v.parse().ok())
+                    .filter(|&ms: &f64| ms > 0.0)
+                    .ok_or("--chunk needs a positive number of milliseconds")?;
                 chunk_ms = Some(ms);
             }
             Some("-h" | "--help") => {
@@ -57,7 +61,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             _ => match sources.last_mut() {
                 Some(s) => s.push(a.into()),
-                None => return Err(format!("{}: a file must follow -s\n\n{USAGE}", a.to_string_lossy()).into()),
+                None => {
+                    return Err(format!("{}: a file must follow -s\n\n{USAGE}", a.to_string_lossy()).into());
+                }
             },
         }
     }
@@ -103,9 +109,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Hands the `moov` and `moof` boxes of an fMP4 file to the remuxer; other kinds go whole.
-fn scan(rm: &mut Remuxer, source: usize, id: u32, path: &PathBuf) -> Result<u64, Box<dyn std::error::Error>> {
+fn scan(rm: &mut Remuxer, source: usize, id: u32, path: &Path) -> Result<u64, Box<dyn std::error::Error>> {
     let mut f = File::open(path)?;
     let len = f.metadata()?.len();
+    rm.set_file_size(id, len);
     let mut head = vec![0u8; len.min(64 << 10) as usize];
     f.read_exact(&mut head)?;
     match unmoof::sniff(&head) {
@@ -167,7 +174,7 @@ fn unmoof_header(b: &[u8]) -> Option<([u8; 4], usize, Option<u64>)> {
     }
 }
 
-fn write(plan: &Plan, files: &[(PathBuf, u64)], to: &PathBuf) -> io::Result<()> {
+fn write(plan: &Plan, files: &[(PathBuf, u64)], to: &Path) -> io::Result<()> {
     let mut w = BufWriter::with_capacity(1 << 20, File::create(to)?);
     w.write_all(&plan.header)?;
     let mut open: Option<(u32, File)> = None;
@@ -195,13 +202,16 @@ fn write(plan: &Plan, files: &[(PathBuf, u64)], to: &PathBuf) -> io::Result<()> 
         f.seek(SeekFrom::Start(r.offset))?;
         let copied = io::copy(&mut f.take(r.len), &mut w)?;
         if copied != r.len {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "an input file shrank while being read"));
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "an input file shrank while being read",
+            ));
         }
     }
     w.flush()
 }
 
-fn report(plan: &Plan, out: &PathBuf) {
+fn report(plan: &Plan, out: &Path) {
     let mb = |b: u64| b as f64 / 1e6;
     eprintln!(
         "{}: {:.1} MB, header {:.2} MB, {} pieces",

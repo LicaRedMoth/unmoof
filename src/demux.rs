@@ -1,7 +1,12 @@
 //! Reading init segments (`moov`) and fragments (`moof`) into tracks and samples.
 
-use crate::bytes::{boxes, fourcc, Rd};
-use crate::{bail, Remuxer, Result};
+use crate::bytes::{Rd, boxes, fourcc};
+use crate::{Remuxer, Result, bail};
+
+/// More samples than this in one `trun` is a damaged box, not a stream.
+const MAX_TRUN_SAMPLES: usize = 1 << 20;
+/// Over 150 hours of 60 fps video: beyond this a track is damaged, and it would only eat memory.
+pub const MAX_TRACK_SAMPLES: usize = 1 << 25;
 
 #[derive(Default)]
 pub struct Source {
@@ -170,7 +175,7 @@ impl Track {
         let last = self.samples.len() - 1;
         for i in 0..last {
             self.samples[i].dts = grid[i];
-            self.samples[i].dur = (grid[i + 1] - grid[i]) as u32;
+            self.samples[i].dur = (grid[i + 1] - grid[i]).min(i64::from(u32::MAX)) as u32;
         }
         self.samples[last].dts = grid[last];
         Some(worst as f64 / self.timescale as f64)
@@ -275,11 +280,12 @@ impl Remuxer {
         if &t.codec == b"encv" || &t.codec == b"enca" {
             bail!("track {} is encrypted; DRM-protected streams are not supported", t.src_id);
         }
-        if &t.handler == b"vide" && (t.width == 0 || t.height == 0) {
-            if let Some((w, h)) = visual_size(&t.stsd) {
-                t.width = (w as u32) << 16;
-                t.height = (h as u32) << 16;
-            }
+        if &t.handler == b"vide"
+            && (t.width == 0 || t.height == 0)
+            && let Some((w, h)) = visual_size(&t.stsd)
+        {
+            t.width = (w as u32) << 16;
+            t.height = (h as u32) << 16;
         }
         Ok(t)
     }
@@ -306,7 +312,9 @@ impl Remuxer {
                     for m in boxes(b.payload) {
                         let m = m?;
                         match &m.typ {
-                            b"vmhd" | b"smhd" | b"sthd" | b"nmhd" | b"hmhd" => t.media_header = m.raw.to_vec(),
+                            b"vmhd" | b"smhd" | b"sthd" | b"nmhd" | b"hmhd" => {
+                                t.media_header = m.raw.to_vec()
+                            }
                             b"stbl" => {
                                 for s in boxes(m.payload) {
                                     let s = s?;
@@ -358,7 +366,14 @@ impl Remuxer {
         Ok(())
     }
 
-    fn read_traf(&mut self, source: usize, file: u32, moof_at: u64, prev_end: u64, payload: &[u8]) -> Result<u64> {
+    fn read_traf(
+        &mut self,
+        source: usize,
+        file: u32,
+        moof_at: u64,
+        prev_end: u64,
+        payload: &[u8],
+    ) -> Result<u64> {
         let mut it = boxes(payload);
         let tfhd = match it.next() {
             Some(b) => b?,
@@ -388,6 +403,7 @@ impl Remuxer {
         let def_flags = if fl & 0x20 != 0 { r.u32()? } else { trex.flags };
 
         let audio = self.tracks[ti].is_audio();
+        let limit = self.file_sizes.get(file as usize).copied().flatten();
         let mut cursor = base;
         let mut first_trun = true;
         for b in it {
@@ -396,7 +412,9 @@ impl Remuxer {
                 b"tfdt" => {
                     let mut r = Rd::new(b.payload);
                     let (v, _) = r.full()?;
-                    let t = if v == 1 { r.u64()? as i64 } else { r.u32()? as i64 };
+                    // 2^62 ticks is millennia at any timescale; above it the box is damaged, and
+                    // capping it keeps all timeline arithmetic inside i64.
+                    let t = if v == 1 { r.u64()? } else { u64::from(r.u32()?) }.min(1 << 62) as i64;
                     resync(&mut self.tracks[ti], t, &mut self.warnings);
                 }
                 b"trun" => {
@@ -404,17 +422,26 @@ impl Remuxer {
                     let (v, tf) = r.full()?;
                     let n = r.u32()? as usize;
                     if tf & 0x01 != 0 {
-                        cursor = base.wrapping_add_signed(r.i32()? as i64);
+                        let Some(c) = base.checked_add_signed(r.i32()? as i64) else {
+                            bail!("a trun points its data before the start of the file");
+                        };
+                        cursor = c;
                     } else if first_trun {
                         cursor = base;
                     }
                     first_trun = false;
                     let first_flags = if tf & 0x04 != 0 { Some(r.u32()?) } else { None };
                     let per = [0x100, 0x200, 0x400, 0x800].iter().filter(|&&f| tf & f != 0).count() * 4;
-                    if r.left() < n * per {
+                    if n > MAX_TRUN_SAMPLES || r.left() < n * per {
                         bail!("a trun lists {n} samples but holds the fields of fewer");
                     }
                     let track = &mut self.tracks[ti];
+                    if track.samples.len() + n > MAX_TRACK_SAMPLES {
+                        bail!(
+                            "track {} has more than {MAX_TRACK_SAMPLES} samples; the stream is damaged",
+                            track.src_id
+                        );
+                    }
                     track.samples.reserve(n);
                     for i in 0..n {
                         let dur = if tf & 0x100 != 0 { r.u32()? } else { def_dur };
@@ -444,7 +471,13 @@ impl Remuxer {
                             off: cursor,
                         });
                         track.next_dts += dur as i64;
-                        cursor += size as u64;
+                        let Some(c) = cursor.checked_add(size as u64) else {
+                            bail!("a trun points its data past any file's end");
+                        };
+                        if limit.is_some_and(|l| c > l) {
+                            bail!("a trun points its data past the end of its {}-byte file", limit.unwrap());
+                        }
+                        cursor = c;
                     }
                 }
                 _ => {}
@@ -498,7 +531,8 @@ fn read_elst(payload: &[u8], movie_timescale: u32, warnings: &mut Vec<String>) -
     let mut delay = 0u64;
     let mut edit = None;
     for _ in 0..n {
-        let (dur, media_time) = if v == 1 { (r.u64()?, r.i64()?) } else { (r.u32()? as u64, r.i32()? as i64) };
+        let (dur, media_time) =
+            if v == 1 { (r.u64()?, r.i64()?) } else { (r.u32()? as u64, r.i32()? as i64) };
         r.skip(4)?;
         if media_time == -1 {
             if edit.is_none() {

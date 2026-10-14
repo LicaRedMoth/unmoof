@@ -5,3 +5,8 @@
 /out
 *.mp4
 *.part
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+/fuzz/coverage
+/fuzz/logs

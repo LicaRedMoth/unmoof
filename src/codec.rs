@@ -38,17 +38,21 @@ fn find_startcode(b: &[u8], from: usize) -> usize {
     b.len()
 }
 
-/// The NAL units of a length-prefixed access unit.
+/// The NAL units of a length-prefixed access unit, empty ones left out.
 pub fn nals(avcc: &[u8]) -> impl Iterator<Item = &[u8]> {
     let mut p = 0;
     std::iter::from_fn(move || {
-        if p + 4 > avcc.len() {
-            return None;
+        loop {
+            if p + 4 > avcc.len() {
+                return None;
+            }
+            let n = u32::from_be_bytes(avcc[p..p + 4].try_into().unwrap()) as usize;
+            let nal = avcc.get(p + 4..(p + 4).checked_add(n)?)?;
+            p += 4 + n;
+            if !nal.is_empty() {
+                return Some(nal);
+            }
         }
-        let n = u32::from_be_bytes(avcc[p..p + 4].try_into().unwrap()) as usize;
-        let nal = avcc.get(p + 4..p + 4 + n)?;
-        p += 4 + n;
-        Some(nal)
     })
 }
 
@@ -118,8 +122,23 @@ pub struct Sps {
 }
 
 const SAR: [(u32, u32); 17] = [
-    (0, 1), (1, 1), (12, 11), (10, 11), (16, 11), (40, 33), (24, 11), (20, 11), (32, 11),
-    (80, 33), (18, 11), (15, 11), (64, 33), (160, 99), (4, 3), (3, 2), (2, 1),
+    (0, 1),
+    (1, 1),
+    (12, 11),
+    (10, 11),
+    (16, 11),
+    (40, 33),
+    (24, 11),
+    (20, 11),
+    (32, 11),
+    (80, 33),
+    (18, 11),
+    (15, 11),
+    (64, 33),
+    (160, 99),
+    (4, 3),
+    (3, 2),
+    (2, 1),
 ];
 
 /// Parses an SPS NAL unit, header byte included.
@@ -135,8 +154,8 @@ pub fn parse_sps(nal: &[u8]) -> Option<Sps> {
         if chroma_format == 3 {
             r.bit()?;
         }
-        bit_depth_luma = r.ue()? + 8;
-        bit_depth_chroma = r.ue()? + 8;
+        bit_depth_luma = r.ue()?.checked_add(8).filter(|&d| d <= 16)?;
+        bit_depth_chroma = r.ue()?.checked_add(8).filter(|&d| d <= 16)?;
         r.bit()?;
         if r.bit()? == 1 {
             for i in 0..if chroma_format != 3 { 8 } else { 12 } {
@@ -145,7 +164,7 @@ pub fn parse_sps(nal: &[u8]) -> Option<Sps> {
                     let (mut last, mut next) = (8i32, 8i32);
                     for _ in 0..size {
                         if next != 0 {
-                            next = (last + r.se()? + 256) % 256;
+                            next = (i64::from(last) + i64::from(r.se()?) + 256).rem_euclid(256) as i32;
                         }
                         last = if next == 0 { last } else { next };
                     }
@@ -170,8 +189,9 @@ pub fn parse_sps(nal: &[u8]) -> Option<Sps> {
     }
     r.ue()?; // max_num_ref_frames
     r.bit()?;
-    let w_mbs = r.ue()? + 1;
-    let h_units = r.ue()? + 1;
+    // Past 4095 macroblocks a side (65 520 pixels) the SPS is damaged, and sizes would overflow.
+    let w_mbs = r.ue()?.checked_add(1).filter(|&n| n < 4096)?;
+    let h_units = r.ue()?.checked_add(1).filter(|&n| n < 4096)?;
     let frame_mbs_only = r.bit()?;
     if frame_mbs_only == 0 {
         r.bit()?;
@@ -189,20 +209,24 @@ pub fn parse_sps(nal: &[u8]) -> Option<Sps> {
             sar = (1, 1);
         }
     }
-    let (ux, uy) = match chroma_format {
+    let (ux, uy): (u32, u32) = match chroma_format {
         0 => (1, 2 - frame_mbs_only),
         1 => (2, 2 * (2 - frame_mbs_only)),
         2 => (2, 2 - frame_mbs_only),
         _ => (1, 2 - frame_mbs_only),
     };
-    let width = (w_mbs * 16).checked_sub(ux * (cl + cr))?;
-    let height = ((2 - frame_mbs_only) * h_units * 16).checked_sub(uy * (ct + cb))?;
+    let width = (w_mbs * 16).checked_sub(ux.checked_mul(cl.checked_add(cr)?)?)?;
+    let height = ((2 - frame_mbs_only) * h_units * 16).checked_sub(uy.checked_mul(ct.checked_add(cb)?)?)?;
     Some(Sps { id, width, height, sar, chroma_format, bit_depth_luma, bit_depth_chroma })
 }
 
 /// An `stsd` holding one `avc1` sample entry built from the parameter sets.
 pub fn avc1_stsd(spss: &[Vec<u8>], ppss: &[Vec<u8>], sps: &Sps) -> Vec<u8> {
-    let first = &spss[0];
+    // avcC counts SPS in 5 bits, PPS in 8, and their lengths in 16.
+    let fits = |n: &&Vec<u8>| n.len() <= usize::from(u16::MAX);
+    let spss: Vec<&Vec<u8>> = spss.iter().filter(fits).take(31).collect();
+    let ppss: Vec<&Vec<u8>> = ppss.iter().filter(fits).take(255).collect();
+    let first = spss[0];
     let mut w = Wr::default();
     let stsd = w.open_full(b"stsd", 0, 0);
     w.u32(1);
@@ -262,7 +286,8 @@ pub struct Adts {
     pub blocks: u8,
 }
 
-pub const AAC_RATES: [u32; 13] = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
+pub const AAC_RATES: [u32; 13] =
+    [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
 
 impl Adts {
     pub fn parse(b: &[u8]) -> Option<Adts> {
@@ -334,7 +359,12 @@ impl Mpa {
             (false, 1) => [0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256],
             (false, _) => [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
         };
-        let rate = [44100, 48000, 32000][sr_i] >> match ver { 3 => 0, 2 => 1, _ => 2 };
+        let rate = [44100, 48000, 32000][sr_i]
+            >> match ver {
+                3 => 0,
+                2 => 1,
+                _ => 2,
+            };
         let bitrate = kbps[br_i] * 1000;
         let pad = ((b[2] >> 1) & 1) as u32;
         let (samples, frame_len) = match layer {
@@ -391,10 +421,7 @@ pub fn mpa_stsd(m: &Mpa) -> Vec<u8> {
 
 /// An `stsd` holding one `mp4a` sample entry for the AAC the ADTS headers describe.
 pub fn mp4a_stsd(a: &Adts, es_id: u16) -> Vec<u8> {
-    let asc = [
-        (a.object_type << 3) | (a.freq_index >> 1),
-        ((a.freq_index & 1) << 7) | (a.channels << 3),
-    ];
+    let asc = [(a.object_type << 3) | (a.freq_index >> 1), ((a.freq_index & 1) << 7) | (a.channels << 3)];
     let mut w = Wr::default();
     let stsd = w.open_full(b"stsd", 0, 0);
     w.u32(1);
@@ -477,14 +504,19 @@ mod tests {
     fn mp3_frame() {
         // MPEG-1 Layer III, 320 kbps, 44.1 kHz, no padding: 1044 bytes, 1152 samples.
         let m = Mpa::parse(&[0xff, 0xfb, 0xe0, 0x44]).unwrap();
-        assert_eq!((m.version, m.layer, m.rate, m.frame_len, m.samples, m.channels), (1, 3, 44100, 1044, 1152, 2));
+        assert_eq!(
+            (m.version, m.layer, m.rate, m.frame_len, m.samples, m.channels),
+            (1, 3, 44100, 1044, 1152, 2)
+        );
     }
 
     #[test]
     fn sps_1080p() {
         // The SPS of the Mux test stream: High profile, 1088 coded lines cropped to 1080.
-        let sps = [0x67, 0x64, 0x00, 0x28, 0xac, 0xd9, 0x80, 0x78, 0x02, 0x27, 0xe5, 0xc0, 0x44, 0x00,
-                   0x00, 0x03, 0x00, 0x04, 0x00, 0x00, 0x03, 0x01, 0xe0, 0x3c, 0x60, 0xc6, 0x68];
+        let sps = [
+            0x67, 0x64, 0x00, 0x28, 0xac, 0xd9, 0x80, 0x78, 0x02, 0x27, 0xe5, 0xc0, 0x44, 0x00, 0x00, 0x03,
+            0x00, 0x04, 0x00, 0x00, 0x03, 0x01, 0xe0, 0x3c, 0x60, 0xc6, 0x68,
+        ];
         let s = parse_sps(&sps).unwrap();
         assert_eq!((s.width, s.height, s.sar, s.chroma_format), (1920, 1080, (1, 1), 1));
     }

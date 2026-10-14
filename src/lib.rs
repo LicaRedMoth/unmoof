@@ -75,6 +75,8 @@ pub struct Remuxer {
     tracks: Vec<demux::Track>,
     warnings: Vec<String>,
     chunk_secs: Option<f64>,
+    /// Lengths of input files, by file number, when the caller told them.
+    file_sizes: Vec<Option<u64>>,
 }
 
 impl Remuxer {
@@ -89,7 +91,12 @@ impl Remuxer {
 
     /// Names the language (ISO 639-2: `rus`, `jpn`) and a title (the studio of a dub) of a
     /// source's tracks. Manifests carry these; segments do not.
-    pub fn set_track_info(&mut self, source: usize, language: Option<&str>, title: Option<&str>) -> Result<()> {
+    pub fn set_track_info(
+        &mut self,
+        source: usize,
+        language: Option<&str>,
+        title: Option<&str>,
+    ) -> Result<()> {
         let Some(s) = self.sources.get_mut(source) else { bail!("source {source} was never opened") };
         if let Some(lang) = language {
             let b = lang.as_bytes();
@@ -102,6 +109,16 @@ impl Remuxer {
             s.title = Some(t.to_string());
         }
         Ok(())
+    }
+
+    /// Tells the length of input file `file`. Samples that would lie past it are then refused
+    /// while feeding, so a few damaged bytes cannot describe millions of samples.
+    pub fn set_file_size(&mut self, file: u32, len: u64) {
+        let i = file as usize;
+        if self.file_sizes.len() <= i {
+            self.file_sizes.resize(i + 1, None);
+        }
+        self.file_sizes[i] = Some(len);
     }
 
     /// Opens a new source and returns its index.

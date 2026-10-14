@@ -1,0 +1,42 @@
+[package]
+name = "unmoof-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.unmoof]
+path = ".."
+
+[[bin]]
+name = "fmp4"
+path = "fuzz_targets/fmp4.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ts"
+path = "fuzz_targets/ts.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "subtitles"
+path = "fuzz_targets/subtitles.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "multi"
+path = "fuzz_targets/multi.rs"
+test = false
+doc = false
+bench = false

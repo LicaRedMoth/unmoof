@@ -1,9 +1,9 @@
 //! Laying out the progressive file: chunks, their interleaving, edit lists and the `moov`.
 
-use crate::bytes::{fourcc, Wr};
+use crate::bytes::{Wr, fourcc};
 use crate::demux::Track;
 use crate::ts::{self, Es};
-use crate::{bail, Remuxer, Result};
+use crate::{Remuxer, Result, bail};
 
 /// Movie timescale of the output, the one ffmpeg writes too.
 const MOVIE_TS: u32 = 1000;
@@ -48,6 +48,10 @@ pub enum Piece {
 }
 
 impl Piece {
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn len(&self) -> u64 {
         match self {
             Piece::Copy(r) => r.len,
@@ -90,11 +94,7 @@ impl Layout {
     }
 
     fn duration(&self, timescale: u32) -> u64 {
-        if self.edited() {
-            self.delay + self.media_dur
-        } else {
-            rescale(self.total, timescale, MOVIE_TS)
-        }
+        if self.edited() { self.delay + self.media_dur } else { rescale(self.total, timescale, MOVIE_TS) }
     }
 }
 
@@ -241,7 +241,8 @@ impl Remuxer {
                     }
                 }
                 chunks.extend(cur.take().map(|(c, _)| c));
-                let time = (s.dts - dts0 + l.shift - l.media_time) as f64 / ts + l.delay as f64 / MOVIE_TS as f64;
+                let time =
+                    (s.dts - dts0 + l.shift - l.media_time) as f64 / ts + l.delay as f64 / MOVIE_TS as f64;
                 cur = Some((
                     Chunk {
                         track: ti,
@@ -277,7 +278,9 @@ impl Remuxer {
                 continue;
             }
             match (t.ts_stream, pieces.last_mut()) {
-                (None, Some(Piece::Copy(r))) if r.file == c.file && r.offset + r.len == c.off => r.len += c.len,
+                (None, Some(Piece::Copy(r))) if r.file == c.file && r.offset + r.len == c.off => {
+                    r.len += c.len
+                }
                 (None, _) => pieces.push(Piece::Copy(Range { file: c.file, offset: c.off, len: c.len })),
                 (Some(stream), Some(Piece::Render { file, len, source, parts }))
                     if *file == c.file && *source == t.source =>
@@ -339,7 +342,14 @@ impl Remuxer {
                 snapped,
             })
             .collect();
-        Ok(Plan { size: header.len() as u64 + payload, header, pieces, ts_streams, tracks: reports, warnings })
+        Ok(Plan {
+            size: header.len() as u64 + payload,
+            header,
+            pieces,
+            ts_streams,
+            tracks: reports,
+            warnings,
+        })
     }
 }
 
@@ -423,7 +433,11 @@ impl Remuxer {
             if found.is_none() && is_mpeg_audio(&t) {
                 found = Some(t);
             } else {
-                warnings.push(format!("track {} ({}) is left out of the MP3 file", t.src_id, fourcc(&t.handler)));
+                warnings.push(format!(
+                    "track {} ({}) is left out of the MP3 file",
+                    t.src_id,
+                    fourcc(&t.handler)
+                ));
             }
         }
         let Some(t) = found else { bail!("no MP3 (MPEG audio) track to write as .mp3") };
@@ -435,10 +449,15 @@ impl Remuxer {
         for s in &t.samples {
             size += s.size as u64;
             match (t.ts_stream, pieces.last_mut()) {
-                (None, Some(Piece::Copy(r))) if r.file == s.file && r.offset + r.len == s.off => r.len += s.size as u64,
-                (None, _) => pieces.push(Piece::Copy(Range { file: s.file, offset: s.off, len: s.size as u64 })),
+                (None, Some(Piece::Copy(r))) if r.file == s.file && r.offset + r.len == s.off => {
+                    r.len += s.size as u64
+                }
+                (None, _) => {
+                    pieces.push(Piece::Copy(Range { file: s.file, offset: s.off, len: s.size as u64 }))
+                }
                 (Some(_), Some(Piece::Render { file, len, parts, .. }))
-                    if *file == s.file && parts.last().is_some_and(|&(_, f, n)| f as u64 + n as u64 == s.off) =>
+                    if *file == s.file
+                        && parts.last().is_some_and(|&(_, f, n)| f as u64 + n as u64 == s.off) =>
                 {
                     *len += s.size as u64;
                     parts.last_mut().unwrap().2 += 1;
@@ -477,7 +496,8 @@ impl Plan {
         let (units, _) = ts::units(data, pids, *packed)?;
         let mut out = Vec::with_capacity(*len as usize);
         for &(stream, first, n) in parts {
-            let Some(run) = units.get(stream).and_then(|u| u.get(first as usize..(first + n) as usize)) else {
+            let Some(run) = units.get(stream).and_then(|u| u.get(first as usize..(first + n) as usize))
+            else {
                 bail!("a TS file holds fewer samples than when it was fed; has it changed?");
             };
             run.iter().for_each(|u| out.extend_from_slice(&u.data));
@@ -562,7 +582,17 @@ fn dur(w: &mut Wr, v: u8, d: u64) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn trak(w: &mut Wr, id: u32, t: &Track, l: &Layout, chunks: &[Placed], base: u64, co64: bool, enabled: bool, group: i16) {
+fn trak(
+    w: &mut Wr,
+    id: u32,
+    t: &Track,
+    l: &Layout,
+    chunks: &[Placed],
+    base: u64,
+    co64: bool,
+    enabled: bool,
+    group: i16,
+) {
     let trak = w.open(b"trak");
 
     let track_dur = l.duration(t.timescale);
@@ -576,7 +606,13 @@ fn trak(w: &mut Wr, id: u32, t: &Track, l: &Layout, chunks: &[Placed], base: u64
     w.i16(t.layer);
     w.i16(group);
     let audio = &t.handler == b"soun";
-    w.u16(if audio && t.volume == 0 { 0x100 } else if audio { t.volume } else { 0 });
+    w.u16(if audio && t.volume == 0 {
+        0x100
+    } else if audio {
+        t.volume
+    } else {
+        0
+    });
     w.u16(0);
     if t.matrix.iter().all(|&b| b == 0) {
         UNITY.iter().for_each(|&m| w.u32(m));
@@ -589,7 +625,8 @@ fn trak(w: &mut Wr, id: u32, t: &Track, l: &Layout, chunks: &[Placed], base: u64
 
     if l.edited() {
         let edts = w.open(b"edts");
-        let v = (l.delay > u32::MAX as u64 || l.media_dur > u32::MAX as u64 || l.media_time > i32::MAX as i64) as u8;
+        let v = (l.delay > u32::MAX as u64 || l.media_dur > u32::MAX as u64 || l.media_time > i32::MAX as i64)
+            as u8;
         let at = w.open_full(b"elst", v, 0);
         w.u32(if l.delay > 0 { 2 } else { 1 });
         let mut entry = |d: u64, m: i64| {

@@ -134,12 +134,30 @@ pub unsafe extern "C" fn unmoof_set_track_info(
     }
 }
 
+/// Tells the length of an input file, so samples past its end are refused while feeding.
+///
+/// # Safety
+/// `h` must come from `unmoof_new`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn unmoof_set_file_size(h: *mut RState, file: u32, len: f64) {
+    if let Some(rm) = unsafe { (*h).rm.as_mut() } {
+        rm.set_file_size(file, len as u64);
+    }
+}
+
 /// Feeds whole top-level boxes of an fMP4 file; `offset` is where they start in the file.
 ///
 /// # Safety
 /// `h` must come from `unmoof_new`; `ptr` must point at `len` readable bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn unmoof_feed(h: *mut RState, source: u32, file: u32, offset: f64, ptr: *const u8, len: usize) -> u32 {
+pub unsafe extern "C" fn unmoof_feed(
+    h: *mut RState,
+    source: u32,
+    file: u32,
+    offset: f64,
+    ptr: *const u8,
+    len: usize,
+) -> u32 {
     let st = unsafe { &mut *h };
     let Some(rm) = st.rm.as_mut() else { return fail(&mut st.buf, "the remuxer has finished") };
     match rm.feed(source as usize, file, offset as u64, unsafe { bytes(ptr, len) }) {
@@ -153,7 +171,13 @@ pub unsafe extern "C" fn unmoof_feed(h: *mut RState, source: u32, file: u32, off
 /// # Safety
 /// `h` must come from `unmoof_new`; `ptr` must point at `len` readable bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn unmoof_feed_ts(h: *mut RState, source: u32, file: u32, ptr: *const u8, len: usize) -> u32 {
+pub unsafe extern "C" fn unmoof_feed_ts(
+    h: *mut RState,
+    source: u32,
+    file: u32,
+    ptr: *const u8,
+    len: usize,
+) -> u32 {
     let st = unsafe { &mut *h };
     let Some(rm) = st.rm.as_mut() else { return fail(&mut st.buf, "the remuxer has finished") };
     match rm.feed_ts(source as usize, file, unsafe { bytes(ptr, len) }) {
@@ -167,7 +191,12 @@ pub unsafe extern "C" fn unmoof_feed_ts(h: *mut RState, source: u32, file: u32, 
 /// # Safety
 /// `h` must come from `unmoof_new`; `ptr` must point at `len` readable bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn unmoof_feed_subtitles(h: *mut RState, source: u32, ptr: *const u8, len: usize) -> u32 {
+pub unsafe extern "C" fn unmoof_feed_subtitles(
+    h: *mut RState,
+    source: u32,
+    ptr: *const u8,
+    len: usize,
+) -> u32 {
     let st = unsafe { &mut *h };
     let Some(rm) = st.rm.as_mut() else { return fail(&mut st.buf, "the remuxer has finished") };
     match rm.feed_subtitles(source as usize, unsafe { bytes(ptr, len) }) {
@@ -350,5 +379,88 @@ pub unsafe extern "C" fn unmoof_plan_render(p: *mut PState, piece: u32, ptr: *co
             0
         }
         Err(e) => fail(&mut st.buf, e),
+    }
+}
+
+/// The calls in the order `unmoof.js` makes them, so Miri can check the pointer handling.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Copies `data` into module memory the way `unmoof.js` does, and runs `f` on it.
+    fn with(data: &[u8], f: impl FnOnce(*const u8, usize) -> u32) -> u32 {
+        let p = unmoof_alloc(data.len());
+        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), p, data.len()) };
+        let r = f(p, data.len());
+        unsafe { unmoof_dealloc(p, data.len()) };
+        r
+    }
+
+    fn buf(h: *mut RState) -> String {
+        unsafe {
+            String::from_utf8_lossy(std::slice::from_raw_parts(unmoof_buf_ptr(h), unmoof_buf_len(h)))
+                .into_owned()
+        }
+    }
+
+    fn plan_buf(p: *mut PState) -> Vec<u8> {
+        unsafe { std::slice::from_raw_parts(unmoof_plan_buf_ptr(p), unmoof_plan_buf_len(p)).to_vec() }
+    }
+
+    const SRT: &[u8] = "1\n00:00:00,500 --> 00:00:01,000\nПривет, <i>мир</i>\n".as_bytes();
+
+    #[test]
+    fn subtitles_round_trip() {
+        unsafe {
+            assert_eq!(with(SRT, |p, n| unmoof_sniff(p, n)), 4);
+            let h = unmoof_new();
+            let s = unmoof_add_source(h);
+            assert_eq!(
+                with(b"rus", |lp, ln| with("Название".as_bytes(), |tp, tn| unmoof_set_track_info(
+                    h, s, lp, ln, tp, tn
+                ))),
+                0
+            );
+            assert_eq!(with(SRT, |p, n| unmoof_feed_subtitles(h, s, p, n)), 0);
+            let p = unmoof_finish(h);
+            assert!(!p.is_null(), "{}", buf(h));
+            assert!(unmoof_plan_header_len(p) > 0);
+            unmoof_plan_info(p);
+            let info = String::from_utf8(plan_buf(p)).unwrap();
+            assert!(info.starts_with("{\"size\":") && info.contains("[2,"), "{info}");
+            assert_eq!(unmoof_plan_data(p, 0), 0);
+            assert!(!plan_buf(p).is_empty());
+            assert_eq!(unmoof_plan_data(p, 99), 1);
+            assert!(String::from_utf8(plan_buf(p)).unwrap().contains("not a data piece"));
+            unmoof_plan_drop(p);
+            unmoof_drop(h);
+        }
+    }
+
+    #[test]
+    fn errors_come_back_as_text() {
+        unsafe {
+            let h = unmoof_new();
+            assert_eq!(with(b"not a box", |p, n| unmoof_feed(h, 7, 0, 0.0, p, n)), 1);
+            assert!(buf(h).contains("never opened"), "{}", buf(h));
+            assert_eq!(with(b"xx", |lp, ln| unmoof_set_track_info(h, 0, lp, ln, std::ptr::null(), 0)), 1);
+            assert!(unmoof_finish(h).is_null());
+            assert!(unmoof_finish(h).is_null(), "a second finish must fail cleanly, not use freed state");
+            assert!(buf(h).contains("finished"));
+            unmoof_drop(h);
+        }
+    }
+
+    #[test]
+    fn empty_input_is_handled() {
+        unsafe {
+            assert_eq!(unmoof_sniff(std::ptr::null(), 0), 0);
+            let h = unmoof_new();
+            let s = unmoof_add_source(h);
+            assert_eq!(unmoof_feed_ts(h, s, 0, std::ptr::null(), 0), 1);
+            assert_eq!(unmoof_feed(h, s, 0, 0.0, std::ptr::null(), 0), 0);
+            assert!(unmoof_finish_mp3(h).is_null());
+            unmoof_drop(h);
+        }
     }
 }

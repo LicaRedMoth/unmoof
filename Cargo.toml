@@ -17,3 +17,13 @@ opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"
+
+# For examples/fuzz.rs: fast, but with overflow checks and unwinding so failures can be caught.
+[profile.fuzz]
+inherits = "release"
+panic = "unwind"
+overflow-checks = true
+debug-assertions = true
+debug = "line-tables-only"
+lto = false
+codegen-units = 16
