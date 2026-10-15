@@ -25,6 +25,8 @@ pub struct TsState {
     offset: i64,
     /// Where the next file should start showing, at 90 kHz.
     next: Option<i64>,
+    /// Where each stream's last frame ended, at 90 kHz.
+    ends: Vec<Option<i64>>,
     /// The latest video decode time, at 90 kHz.
     last_dts: Option<i64>,
     warned_sps: bool,
@@ -78,6 +80,7 @@ impl Remuxer {
                 last: None,
                 offset: 0,
                 next: None,
+                ends: vec![None; n],
                 last_dts: None,
                 warned_sps: false,
                 warned_adts: false,
@@ -91,24 +94,43 @@ impl Remuxer {
     }
 
     fn read_ts_file(&mut self, source: usize, file: u32, data: &[u8], st: &mut TsState) -> Result<()> {
-        let (units, broken) = ts::units(data, &st.pids, st.packed)?;
+        let (mut units, broken) = ts::units(data, &st.pids, st.packed)?;
         if broken > 0 {
             self.warnings.push(format!(
                 "file {file}: skipped {broken} damaged TS packets or stretches of bytes that are not frames"
             ));
         }
+        for (i, list) in units.iter_mut().enumerate() {
+            if st.pids[i].0 == Es::H264 {
+                let (n, worst) = mend_picture_times(list);
+                if n > 0 {
+                    self.warnings.push(format!(
+                        "file {file}: {n} pictures claim to be shown up to {:.3} s after they are decoded; \
+                         they are shown as late as the others",
+                        worst as f64 / CLOCK as f64
+                    ));
+                }
+            }
+        }
 
         // A clock that does not go on from the last file (a discontinuity, a missing segment)
-        // is shifted so the file shows right after the last frame shown.
-        let times: Vec<(i64, i64)> = units
+        // is shifted so the file shows right after the last frame shown. It jumps when every
+        // stream jumps: a muxer may carry audio well ahead of the video, each going on in step.
+        let times: Vec<(usize, i64, i64)> = units
             .iter()
-            .filter_map(|u| u.iter().find_map(|u| u.dts.map(|d| (u.pts.unwrap_or(d), d))))
-            .map(|(p, d)| (st.unwrap(p), st.unwrap(d)))
+            .enumerate()
+            .filter_map(|(i, u)| u.iter().find_map(|u| u.dts.map(|d| (i, u.pts.unwrap_or(d), d))))
+            .map(|(i, p, d)| (i, st.unwrap(p), st.unwrap(d)))
             .collect();
-        let first = times.iter().map(|&(p, _)| p).min();
+        let first = times.iter().map(|&(_, p, _)| p).min();
+        let steps: Vec<bool> = times
+            .iter()
+            .filter_map(|&(i, p, _)| st.ends[i].map(|end| (p + st.offset - end).abs() > CLOCK))
+            .collect();
         if let (Some(first), Some(next)) = (first, st.next) {
             let at = first + st.offset;
-            if (at - next).abs() > CLOCK {
+            let jumped = if steps.is_empty() { (at - next).abs() > CLOCK } else { steps.iter().all(|&j| j) };
+            if jumped {
                 self.warnings.push(format!(
                     "file {file}: the clock jumps by {:+.3} s; the file is joined on where the last one ended",
                     (at - next) as f64 / CLOCK as f64
@@ -116,7 +138,7 @@ impl Remuxer {
                 st.offset += next - at;
                 // Decoding must still go forward: a file starting on a reordered frame may need
                 // a little more room.
-                let first_dts = times.iter().map(|&(_, d)| d).min().unwrap() + st.offset;
+                let first_dts = times.iter().map(|&(_, _, d)| d).min().unwrap() + st.offset;
                 if let Some(last) = st.last_dts
                     && first_dts <= last
                 {
@@ -162,13 +184,17 @@ impl Remuxer {
                             None => u.mpa.map_or(1152, |m| m.samples) as i64,
                         };
                         let at = (dts * rate + CLOCK / 2).div_euclid(CLOCK) + u.frame_in_pes as i64 * frame;
-                        next = next.max(dts + (u.frame_in_pes as i64 + 1) * frame * CLOCK / rate);
+                        let end = dts + (u.frame_in_pes as i64 + 1) * frame * CLOCK / rate;
+                        next = next.max(end);
+                        st.ends[i] = Some(st.ends[i].map_or(end, |e| e.max(end)));
                         (at, frame as u32, 0)
                     }
                 };
                 if st.pids[i].0 == Es::H264 {
                     let step = t.samples.last().map(|s| dts_t - s.dts).filter(|&d| d > 0).unwrap_or(3003);
-                    next = next.max(dts_t + cto as i64 + step);
+                    let end = dts_t + cto as i64 + step;
+                    next = next.max(end);
+                    st.ends[i] = Some(st.ends[i].map_or(end, |e| e.max(end)));
                     st.last_dts = Some(st.last_dts.map_or(dts_t, |l| l.max(dts_t)));
                 }
                 t.samples.push(Sample {
@@ -306,11 +332,76 @@ impl Remuxer {
     }
 }
 
+/// No decoder holds a picture back for anything like this long: up to 16 pictures wait.
+const MAX_REORDER: i64 = 10 * CLOCK;
+
+/// Gives pictures whose presentation time lies absurdly far from their decode time the offset
+/// most pictures of the file have. Returns how many were mended and the worst offset seen.
+fn mend_picture_times(list: &mut [ts::Unit]) -> (usize, i64) {
+    let offset = |u: &ts::Unit| {
+        let d = (u.pts? as i64 - u.dts? as i64).rem_euclid(WRAP);
+        Some(if d >= WRAP / 2 { d - WRAP } else { d })
+    };
+    let mut good: Vec<i64> = list.iter().filter_map(offset).filter(|d| d.abs() <= MAX_REORDER).collect();
+    good.sort_unstable();
+    let usual = good.get(good.len() / 2).copied().unwrap_or(0);
+    let (mut n, mut worst) = (0, 0i64);
+    for u in list.iter_mut() {
+        if let (Some(d), Some(dts)) = (offset(u), u.dts)
+            && d.abs() > MAX_REORDER
+        {
+            u.pts = Some((dts as i64 + usual).rem_euclid(WRAP) as u64);
+            n += 1;
+            worst = worst.max(d.abs());
+        }
+    }
+    (n, worst)
+}
+
 impl Track {
     /// Durations of video read from MPEG-TS, which states times only: each frame lasts until
-    /// the next one is decoded, the last as long as the one before it.
-    pub fn close_ts(&mut self) {
-        if self.ts_stream.is_none() || &self.handler != b"vide" {
+    /// the next one is decoded, the last as long as the one before it. Audio frames last a frame,
+    /// except before a gap in the stream, so the audio after the gap keeps its time.
+    pub fn close_ts(&mut self, warnings: &mut Vec<String>) {
+        if self.ts_stream.is_none() {
+            return;
+        }
+        if &self.handler != b"vide" {
+            let (mut spikes, mut worst) = (0, 0i64);
+            for i in 0..self.samples.len().saturating_sub(1) {
+                let (s, next) = (&self.samples[i], &self.samples[i + 1]);
+                let gap = next.dts - (s.dts + s.dur as i64);
+                if gap * 2 <= s.dur as i64 {
+                    continue;
+                }
+                // A gap is a step the clock stays on; one damaged time is a spike it comes back from.
+                if self.samples[i + 2..].iter().take(32).any(|x| x.dts < next.dts) {
+                    let at = s.dts + s.dur as i64;
+                    self.samples[i + 1].dts = at;
+                    spikes += 1;
+                    worst = worst.max(gap);
+                    self.fixes += 1;
+                    continue;
+                }
+                if gap > self.timescale as i64 / 2 {
+                    warnings.push(format!(
+                        "track {}: {:.3} s of audio missing after {:.3} s; the gap is kept",
+                        self.src_id,
+                        gap as f64 / self.timescale as f64,
+                        (s.dts - self.samples[0].dts) as f64 / self.timescale as f64
+                    ));
+                }
+                self.samples[i].dur = (s.dur as i64 + gap).min(u32::MAX as i64) as u32;
+                self.fixes += 1;
+            }
+            if spikes > 0 {
+                warnings.push(format!(
+                    "track {}: {spikes} audio frames carry times up to {:.3} s off the frames around them; \
+                     they are played in turn",
+                    self.src_id,
+                    worst as f64 / self.timescale as f64
+                ));
+            }
             return;
         }
         let n = self.samples.len();

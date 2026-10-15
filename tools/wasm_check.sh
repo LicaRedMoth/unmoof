@@ -62,5 +62,7 @@ if [ -f $B/sub.srt ]; then
     same subtitles-ass -s $B/sub_v_frag.mp4 -s $B/s.ass
 fi
 [ -f $T/vk/seg-00.ts ] && same vk.mp3 -s $(ls -v $T/vk/seg-*.ts)
+P=$T/dash_pto
+[ -f $P/src0/pto.txt ] && same dash-pto -s $(cat $P/src0/list.txt) --pto $(cat $P/src0/pto.txt) -s $(cat $P/src1/list.txt)
 echo "$pass same, $fail different"
 [ $fail -eq 0 ]

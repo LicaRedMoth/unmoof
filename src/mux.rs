@@ -172,7 +172,7 @@ impl Remuxer {
                     t.source
                 ));
             } else {
-                t.close_ts();
+                t.close_ts(&mut warnings);
                 snapped.push(t.snap_audio());
                 tracks.push(t);
             }

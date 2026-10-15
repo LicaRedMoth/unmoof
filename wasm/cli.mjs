@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // The unmoof command again, on unmoof.wasm under Node: the same arguments and the same file,
 // so the module can be checked against the native build byte for byte.
-//   node cli.mjs -o OUT.mp4|OUT.mp3 -s [--lang L] [--title T] FILE... [-s ...]... [--chunk MS]
+//   node cli.mjs -o OUT.mp4|OUT.mp3 -s [--lang L] [--title T] [--pto T/S] FILE... [-s ...]... [--chunk MS]
 import { openSync, readSync, fstatSync, writeSync, closeSync, readFileSync, renameSync } from 'node:fs';
 import { init } from './unmoof.js';
 
@@ -15,6 +15,7 @@ for (let i = 0; i < args.length; i++) {
   else if (args[i] === '-s') { sources.push([]); infos.push({}); }
   else if (args[i] === '--lang') infos.at(-1).language = args[++i];
   else if (args[i] === '--title') infos.at(-1).title = args[++i];
+  else if (args[i] === '--pto') infos.at(-1).pto = args[++i].split('/').map(Number);
   else if (sources.length) sources.at(-1).push(args[i]);
   else throw new Error(`${args[i]}: a file must follow -s`);
 }
@@ -31,6 +32,7 @@ const files = [];
 for (const [g, group] of sources.entries()) {
   const s = rm.addSource();
   rm.setTrackInfo(s, infos[g]);
+  if (infos[g].pto) rm.setTimeOffset(s, ...infos[g].pto);
   for (const path of group) {
     const fd = openSync(path, 'r');
     const size = fstatSync(fd).size;

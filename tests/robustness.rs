@@ -234,6 +234,161 @@ fn ts_with_h264(es: &[u8]) -> Vec<u8> {
     cat(&[ts_packet(0, true, &pat), ts_packet(0x1000, true, &pmt), ts_packet(0x100, true, &pes)])
 }
 
+/// A 33-bit PTS or DTS as a PES header writes it, after the 4-bit `prefix`.
+fn time_field(prefix: u8, t: u64) -> [u8; 5] {
+    [
+        prefix << 4 | (t >> 29 & 0x0e) as u8 | 1,
+        (t >> 22) as u8,
+        (t >> 14 & 0xfe | 1) as u8,
+        (t >> 7) as u8,
+        (t << 1 & 0xfe | 1) as u8,
+    ]
+}
+
+/// An ADTS frame of AAC-LC, 48 kHz stereo, `len` bytes long with its header.
+fn adts(len: usize) -> Vec<u8> {
+    let mut f = vec![
+        0xff,
+        0xf1,
+        0x4c,
+        0x80 | (len >> 11) as u8,
+        (len >> 3) as u8,
+        ((len & 7) << 5) as u8 | 0x1f,
+        0xfc,
+    ];
+    f.resize(len, 0);
+    f
+}
+
+/// A TS file of H.264 pictures on PID 0x100, one PES each with the PTS and DTS given (an IDR
+/// picture with a 320x240 Baseline SPS and PPS first, then P pictures), and AAC on PID 0x101,
+/// a PES of two frames at each time given.
+fn ts_file(pictures: &[(u64, u64)], audio: &[u64]) -> Vec<u8> {
+    let mut w = BitWriter::default();
+    w.put(66, 8);
+    w.put(0, 8);
+    w.put(30, 8);
+    w.ue(0); // sps id
+    w.ue(0); // log2_max_frame_num_minus4
+    w.ue(2); // pic_order_cnt_type
+    w.ue(1); // max_num_ref_frames
+    w.put(0, 1);
+    w.ue(19); // pic_width_in_mbs_minus1
+    w.ue(14); // pic_height_in_map_units_minus1
+    w.put(1, 1); // frame_mbs_only
+    w.put(0, 2);
+    let sps = w.bytes();
+    let pat = [0, 0x00, 0xb0, 13, 0, 1, 0xc1, 0, 0, 0, 1, 0xf0, 0x00, 0, 0, 0, 0];
+    let mut streams = Vec::new();
+    if !pictures.is_empty() {
+        streams.extend_from_slice(&[0x1b, 0xe1, 0x00, 0xf0, 0]);
+    }
+    if !audio.is_empty() {
+        streams.extend_from_slice(&[0x0f, 0xe1, 0x01, 0xf0, 0]);
+    }
+    let mut pmt = vec![0, 0x02, 0xb0, 13 + streams.len() as u8, 0, 1, 0xc1, 0, 0, 0xe1, 0x00, 0xf0, 0];
+    pmt.extend(streams);
+    pmt.extend_from_slice(&[0; 4]);
+    let mut out = cat(&[ts_packet(0, true, &pat), ts_packet(0x1000, true, &pmt)]);
+    for (k, &(pts, dts)) in pictures.iter().enumerate() {
+        let mut pes = vec![0, 0, 1, 0xe0, 0, 0, 0x80, 0xc0, 10];
+        pes.extend_from_slice(&time_field(3, pts));
+        pes.extend_from_slice(&time_field(1, dts));
+        pes.extend_from_slice(&[0, 0, 0, 1, 0x09, 0xf0]);
+        if k == 0 {
+            pes.extend_from_slice(&[0, 0, 0, 1, 0x67]);
+            pes.extend_from_slice(&sps);
+            pes.extend_from_slice(&[0, 0, 0, 1, 0x68, 0xce, 0x38, 0x80, 0, 0, 0, 1, 0x65, 0x88, 0x84, 0x21]);
+        } else {
+            pes.extend_from_slice(&[0, 0, 0, 1, 0x41, 0x9a, 0x02, 0x21]);
+        }
+        out.extend(ts_packet(0x100, true, &pes));
+    }
+    for &t in audio {
+        // 14 bytes of PES header and two frames of 85 fill the packet exactly.
+        let mut pes = vec![0, 0, 1, 0xc0, 0, 178, 0x80, 0x80, 5];
+        pes.extend_from_slice(&time_field(2, t));
+        pes.extend(cat(&[adts(85), adts(85)]));
+        out.extend(ts_packet(0x101, true, &pes));
+    }
+    out
+}
+
+fn ts_with_aac(times: &[u64]) -> Vec<u8> {
+    ts_file(&[], times)
+}
+
+fn ts_with_pictures(times: &[(u64, u64)]) -> Vec<u8> {
+    ts_file(times, &[])
+}
+
+#[test]
+fn audio_gap_in_ts_keeps_the_audio_after_it_in_time() {
+    // Two frames at 1 s, then two more at 4 s: the three seconds between are missing.
+    let mut rm = Remuxer::new();
+    let s = rm.add_source();
+    rm.feed_ts(s, 0, &ts_with_aac(&[90_000, 360_000])).unwrap();
+    let plan = rm.finish().unwrap();
+    let d = plan.tracks[0].duration;
+    assert!((d - (3.0 + 2.0 * 1024.0 / 48000.0)).abs() < 0.002, "audio lasts {d} s");
+    assert!(plan.warnings.iter().any(|w| w.contains("missing")), "{:?}", plan.warnings);
+}
+
+#[test]
+fn a_lone_audio_time_far_ahead_is_no_gap() {
+    // The third PES says 4900 s, the fourth goes on from the second: a damaged time, not a gap.
+    let step = 2 * 1024 * 90_000 / 48_000;
+    let mut rm = Remuxer::new();
+    let s = rm.add_source();
+    let times = [90_000, 90_000 + step, 90_000 + 4900 * 90_000, 90_000 + 3 * step];
+    rm.feed_ts(s, 0, &ts_with_aac(&times)).unwrap();
+    // Another source a second earlier, so the track is placed by its times, not its length.
+    let early = rm.add_source();
+    rm.feed_ts(early, 1, &ts_with_aac(&[0])).unwrap();
+    let plan = rm.finish().unwrap();
+    let d = plan.tracks[0].duration;
+    assert!((d - 8.0 * 1024.0 / 48000.0).abs() < 0.002, "audio lasts {d} s");
+    assert!(!plan.warnings.iter().any(|w| w.contains("missing")), "{:?}", plan.warnings);
+}
+
+#[test]
+fn a_picture_shown_hours_after_its_decoding_is_damaged() {
+    // 30 fps, each picture shown 100 ms after it is decoded, but the last picture of the first
+    // file claims to show 4900 s late. It used to push the second file 4900 s on.
+    let pic = |k: u64| (90_000 + k * 3000 + 9000, 90_000 + k * 3000);
+    let mut a: Vec<(u64, u64)> = (0..5).map(pic).collect();
+    a[4].0 += 4900 * 90_000;
+    let b: Vec<(u64, u64)> = (5..10).map(pic).collect();
+    let mut rm = Remuxer::new();
+    let s = rm.add_source();
+    rm.feed_ts(s, 0, &ts_with_pictures(&a)).unwrap();
+    rm.feed_ts(s, 1, &ts_with_pictures(&b)).unwrap();
+    let plan = rm.finish().unwrap();
+    let d = plan.tracks[0].duration;
+    assert!((d - 10.0 / 30.0).abs() < 0.002, "video lasts {d} s");
+    assert!(!plan.warnings.iter().any(|w| w.contains("jumps")), "{:?}", plan.warnings);
+    assert!(plan.warnings.iter().any(|w| w.contains("decoded")), "{:?}", plan.warnings);
+}
+
+#[test]
+fn audio_muxed_ahead_of_the_video_is_no_jump() {
+    // Each file carries its own pictures and the audio of ten seconds later, as some muxers
+    // write it: each stream goes on from where it ended, though the file as a whole does not.
+    let step = 2 * 1024 * 90_000 / 48_000;
+    let pic = |k: u64| (90_000 + k * 3000 + 9000, 90_000 + k * 3000);
+    let sound = |j: u64| 990_000 + j * step;
+    let a = ts_file(&(0..5).map(pic).collect::<Vec<_>>(), &[sound(0), sound(1)]);
+    let b = ts_file(&(5..10).map(pic).collect::<Vec<_>>(), &[sound(2), sound(3)]);
+    let mut rm = Remuxer::new();
+    let s = rm.add_source();
+    rm.feed_ts(s, 0, &a).unwrap();
+    rm.feed_ts(s, 1, &b).unwrap();
+    let plan = rm.finish().unwrap();
+    assert!(!plan.warnings.iter().any(|w| w.contains("jumps")), "{:?}", plan.warnings);
+    let start = |h: &str| plan.tracks.iter().find(|t| t.handler == h).unwrap().start;
+    assert!((start("soun") - start("vide") - 9.9).abs() < 0.002, "{} {}", start("soun"), start("vide"));
+}
+
 #[test]
 fn empty_nal_unit_in_ts() {
     // A start code right after a start code: a NAL unit of no bytes, then an IDR slice.
@@ -325,10 +480,10 @@ fn a_line_of_unclosed_brackets_takes_linear_time() {
     assert!(t.elapsed() < Duration::from_secs(1), "took {:?}", t.elapsed());
 }
 
-#[test]
-fn fifty_thousand_overlapping_cues_take_little_time() {
+/// Seconds it takes to lay out `n` subtitle cues that all stay on screen to the end.
+fn overlapping_cues(n: usize) -> f64 {
     let mut srt = String::new();
-    for i in 0..50_000 {
+    for i in 0..n {
         srt += &format!(
             "{}\n00:00:{:02},{:03} --> 01:00:00,000\nline {i}\n\n",
             i + 1,
@@ -341,5 +496,14 @@ fn fifty_thousand_overlapping_cues_take_little_time() {
     let s = rm.add_source();
     rm.feed_subtitles(s, srt.as_bytes()).unwrap();
     plan_adds_up(rm);
-    assert!(t.elapsed() < Duration::from_secs(5), "took {:?}", t.elapsed());
+    t.elapsed().as_secs_f64()
+}
+
+#[test]
+fn overlapping_cues_take_linear_time() {
+    // Ten times the cues take some ten times as long; a quadratic sweep takes a hundred. A ratio
+    // holds on a busy machine, where a fixed limit in seconds does not.
+    let small = overlapping_cues(5_000).min(overlapping_cues(5_000));
+    let large = overlapping_cues(50_000).min(overlapping_cues(50_000));
+    assert!(large < 30.0 * small, "5,000 cues took {small:.3} s, 50,000 took {large:.3} s");
 }
