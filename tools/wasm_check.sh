@@ -7,7 +7,7 @@ O=out/wasm
 mkdir -p $O
 cargo build --release -q || exit 1
 (cd wasm && cargo build --release -q --target wasm32-unknown-unknown) || exit 1
-wasm-opt -Oz --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext \
+wasm-opt -O3 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext \
     --enable-mutable-globals wasm/target/wasm32-unknown-unknown/release/unmoof_wasm.wasm -o wasm/unmoof.wasm || exit 1
 echo "unmoof.wasm: $(stat -c %s wasm/unmoof.wasm) bytes, $(gzip -9 -c wasm/unmoof.wasm | wc -c) gzipped"
 

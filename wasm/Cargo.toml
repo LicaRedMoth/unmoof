@@ -13,7 +13,8 @@ crate-type = ["cdylib"]
 unmoof = { path = ".." }
 
 [profile.release]
-opt-level = "z"
+# Speed over size: -O3 runs subtitles and fMP4 layout 2-3x faster than -Oz for 18 KB gzipped.
+opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"
