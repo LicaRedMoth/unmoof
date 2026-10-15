@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Compares two files packet by packet: MD5, size and keyframe flag of every packet, and
-presentation times up to a constant shift per stream, which it reports. Uses ffprobe."""
+presentation times up to a constant shift per stream, which it reports. Uses ffprobe.
+With --no-sync, how video moves against audio is reported but not held against the files."""
 import json, subprocess, sys
 
 def packets(path):
@@ -26,7 +27,7 @@ def packets(path):
 def f(x):
     return None if x in (None, 'N/A') else float(x)
 
-def main(a, b, sync_ms=0.0, tol=0.0015):
+def main(a, b, sync_ms=0.0, tol=0.0015, judge_sync=True):
     sa, pa = packets(a)
     sb, pb = packets(b)
     ok = True
@@ -74,11 +75,12 @@ def main(a, b, sync_ms=0.0, tol=0.0015):
         sync = (offsets['video'] - offsets['audio']) * 1000
         print(f'video moves {sync:+.3f} ms against audio from the first file to the second'
               + (f' ({sync_ms:+.3f} ms expected)' if sync_ms else ''))
-        if abs(sync - sync_ms) > tol * 1000:
+        if judge_sync and abs(sync - sync_ms) > tol * 1000:
             ok = False
     print('SAME' if ok else 'DIFFERENT')
     return ok
 
 if __name__ == '__main__':
     # An optional third argument: how far video is known to move against audio, in ms.
-    sys.exit(0 if main(sys.argv[1], sys.argv[2], *map(float, sys.argv[3:4])) else 1)
+    args = [x for x in sys.argv[1:] if x != '--no-sync']
+    sys.exit(0 if main(args[0], args[1], *map(float, args[2:3]), judge_sync='--no-sync' not in sys.argv) else 1)

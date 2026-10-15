@@ -4,8 +4,9 @@
 usage: corpus.py [SECONDS]
 
 For each stream: fetch the first SECONDS (tools/fetch.py), remux with unmoof, remux the same
-segments with ffmpeg, compare packet by packet (tools/compare.py), delete the files. Results
-go to out/corpus/results.jsonl, one line per stream, and the run resumes where it stopped.
+segments with ffmpeg, compare packet by packet (tools/compare.py), check where audio starts
+against video by the specifications (tools/sync.py), delete the files. Results go to
+out/corpus/results.jsonl, one line per stream, and the run resumes where it stopped.
 out/corpus/report.md sums them up. Live, DRM and SAMPLE-AES streams are skipped by design.
 """
 import json, os, re, shutil, subprocess, sys, urllib.request
@@ -66,6 +67,28 @@ def run(cmd, timeout):
         return -1, f'timeout after {timeout} s'
 
 
+def sync_check(work, ours):
+    """(desynced, note): audio against video in unmoof's output, against tools/sync.py."""
+    rc, out = run(['python3', 'tools/sync.py', work], 300)
+    if rc != 0:
+        return False, 'sync not judged: ' + out[-200:]
+    want = json.loads(out)
+    rc, out = run(['ffprobe', '-v', 'error', '-show_entries', 'stream=codec_type,start_time', '-of', 'csv=p=0', ours], 60)
+    got = {}
+    for line in out.split():
+        kind, _, t = line.partition(',')
+        if t not in ('', 'N/A'):
+            got.setdefault(kind, []).append(float(t))
+    if not (want['video'] and want['audio'] and got.get('video') and got.get('audio')):
+        return False, 'sync: no video and audio to set against each other'
+    if want['damaged']:
+        return False, 'sync not judged: some pictures carry absurd times'
+    off = (got['audio'][0] - got['video'][0]) - (want['audio'][0] - want['video'][0])
+    if abs(off) > 0.001:
+        return True, f'audio sits {off * 1000:+.3f} ms off where the specs put it against video'
+    return False, f'sync as the specs put it ({off * 1000:+.3f} ms)'
+
+
 def check(origin, name, url, seconds):
     if url.startswith('//'):
         url = 'https:' + url
@@ -88,6 +111,7 @@ def check(origin, name, url, seconds):
     if rc != 0:
         return 'UNMOOF_ERROR', msg[-400:]
     warnings = [l.strip() for l in msg.splitlines() if 'warning' in l]
+    desynced, sync_note = sync_check(work, ours)
     refin, maps = [], []
     for i, files in enumerate(lists):
         cat = os.path.join(work, f'cat{i}')
@@ -103,12 +127,17 @@ def check(origin, name, url, seconds):
     if rc != 0:
         # No reference to compare with: at least the output must decode cleanly.
         rc, dmsg = run(['ffmpeg', '-v', 'error', '-i', ours, '-f', 'null', '-'], 300)
-        return ('DECODES' if rc == 0 and not dmsg else 'DECODE_ERRORS'), f'ffmpeg cannot remux it: {fmsg[:200]}; {dmsg[:200]}'
-    rc, cmp = run(['python3', 'tools/compare.py', ref, ours], 600)
-    detail = ' | '.join(l.strip() for l in cmp.splitlines() if 'mismatch' in l or 'moves' in l or 'only in' in l)
+        status = 'DECODES' if rc == 0 and not dmsg else 'DECODE_ERRORS'
+        detail = f'{sync_note}; ffmpeg cannot remux it: {fmsg[:200]}; {dmsg[:200]}'
+        return ('DESYNC' if desynced else status), detail
+    # ffmpeg is the judge of every packet, not of where the streams start against each other.
+    rc, cmp = run(['python3', 'tools/compare.py', ref, ours, '--no-sync'], 600)
+    detail = sync_note + ' | ' + ' | '.join(
+        l.strip() for l in cmp.splitlines() if 'mismatch' in l or 'moves' in l or 'only in' in l)
     if warnings:
         detail += ' || ' + ' | '.join(warnings)[:300]
-    return ('SAME' if 'SAME' in cmp.splitlines()[-1:] else 'DIFFERENT'), detail[:900]
+    status = 'SAME' if 'SAME' in cmp.splitlines()[-1:] else 'DIFFERENT'
+    return ('DESYNC' if desynced else status), detail[:900]
 
 
 def report(results):
@@ -116,7 +145,7 @@ def report(results):
     c = Counter(r['status'] for r in results)
     lines = ['# unmoof against public test streams', '', '| status | streams |', '|---|---|']
     lines += [f'| {k} | {v} |' for k, v in c.most_common()]
-    for status in ('DIFFERENT', 'UNMOOF_ERROR', 'DECODE_ERRORS', 'DECODES', 'FETCH_FAILED', 'SKIPPED'):
+    for status in ('DESYNC', 'DIFFERENT', 'UNMOOF_ERROR', 'DECODE_ERRORS', 'DECODES', 'FETCH_FAILED', 'SKIPPED'):
         rows = [r for r in results if r['status'] == status]
         if rows:
             lines += ['', f'## {status} ({len(rows)})', '']
