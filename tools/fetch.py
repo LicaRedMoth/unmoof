@@ -263,7 +263,8 @@ def sidx_ranges(url, sb, seconds):
         if t == b'sidx':
             if p + size > len(head):
                 head = get(url, (0, p + size - 1))
-            files, got = [(url, (0, p + size - 1))], 0.0
+            # The init segment stops before the index: ffmpeg cannot read a sidx that points at sidx.
+            files, got = [(url, (0, p - 1))], 0.0
             todo = sidx_refs(head[p:p + size], p)
             while todo and got < seconds:
                 a, b, dur, nested = todo.pop(0)
