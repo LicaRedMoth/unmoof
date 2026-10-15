@@ -96,6 +96,14 @@ class Remuxer {
       x.unmoof_set_track_info(this.#h, source, lp, ln, tp, tn))));
   }
 
+  /**
+   * Plays media time `ticks / timescale` of a source at the start of the movie: the
+   * presentationTimeOffset and timescale of a DASH SegmentTemplate or SegmentBase, as written.
+   */
+  setTimeOffset(source, ticks, timescale) {
+    this.#check(this.#um.x.unmoof_set_time_offset(this.#h, source, ticks, timescale));
+  }
+
   /** How long a chunk may run, which is how finely video and audio interleave. */
   setChunkMs(ms) {
     this.#um.x.unmoof_set_chunk_ms(this.#h, ms);

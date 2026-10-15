@@ -134,6 +134,20 @@ pub unsafe extern "C" fn unmoof_set_track_info(
     }
 }
 
+/// Plays media time `ticks / timescale` of a source at the start of the movie (DASH PTO).
+///
+/// # Safety
+/// `h` must come from `unmoof_new`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn unmoof_set_time_offset(h: *mut RState, source: u32, ticks: f64, timescale: u32) -> u32 {
+    let st = unsafe { &mut *h };
+    let Some(rm) = st.rm.as_mut() else { return fail(&mut st.buf, "the remuxer has finished") };
+    match rm.set_time_offset(source as usize, ticks as i64, timescale) {
+        Ok(()) => 0,
+        Err(e) => fail(&mut st.buf, e),
+    }
+}
+
 /// Tells the length of an input file, so samples past its end are refused while feeding.
 ///
 /// # Safety

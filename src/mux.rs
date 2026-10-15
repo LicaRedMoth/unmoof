@@ -9,6 +9,8 @@ use crate::{Remuxer, Result, bail};
 const MOVIE_TS: u32 = 1000;
 /// A chunk closes once it spans this much media time, unless the caller sets another span.
 const CHUNK_SECS: f64 = 0.5;
+/// Tracks of one stream start within seconds of each other; a larger gap means unrelated clocks.
+const CLOCK_GAP_SECS: f64 = 60.0;
 
 const UNITY: [u32; 9] = [0x1_0000, 0, 0, 0, 0x1_0000, 0, 0, 0, 0x4000_0000];
 
@@ -94,7 +96,11 @@ impl Layout {
     }
 
     fn duration(&self, timescale: u32) -> u64 {
-        if self.edited() { self.delay + self.media_dur } else { rescale(self.total, timescale, MOVIE_TS) }
+        if self.edited() {
+            self.delay.saturating_add(self.media_dur)
+        } else {
+            rescale(self.total, timescale, MOVIE_TS)
+        }
     }
 }
 
@@ -120,7 +126,7 @@ struct Placed {
 }
 
 fn rescale(v: u64, from: u32, to: u32) -> u64 {
-    ((v as u128 * to as u128 + from as u128 / 2) / from as u128) as u64
+    ((v as u128 * to as u128 + from as u128 / 2) / from as u128).min(u64::MAX as u128) as u64
 }
 
 impl Remuxer {
@@ -197,7 +203,7 @@ impl Remuxer {
                 }
                 None => (min_pts, min_pts as f64 / ts as f64),
             };
-            starts.push(start);
+            starts.push(start - self.sources[t.source].time_offset);
             lays.push(Layout {
                 shift: -min_cto,
                 delay: 0,
@@ -216,6 +222,15 @@ impl Remuxer {
         let t0 = if t0.is_finite() { t0 } else { 0.0 };
         for ((l, s), t) in lays.iter_mut().zip(&starts).zip(&tracks) {
             l.delay = if t.relative { 0 } else { ((s - t0) * MOVIE_TS as f64).round() as u64 };
+            if !t.relative && s - t0 > CLOCK_GAP_SECS {
+                warnings.push(format!(
+                    "track {} of source {} starts {:.0} s after the first track; if its source keeps \
+                     another clock, give it a time offset",
+                    t.src_id,
+                    t.source,
+                    s - t0
+                ));
+            }
         }
 
         // Chunks: runs of samples that lie back to back in one input file.

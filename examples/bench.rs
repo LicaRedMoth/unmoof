@@ -8,7 +8,9 @@ use std::time::Instant;
 use unmoof::{Piece, Remuxer};
 
 /// The top-level `moov` and `moof` boxes of a file and where they lie: all the remuxer reads.
-fn boxes(b: &[u8]) -> Vec<(u64, Vec<u8>)> {
+type Boxes = Vec<(u64, Vec<u8>)>;
+
+fn boxes(b: &[u8]) -> Boxes {
     let (mut out, mut p) = (Vec::new(), 0usize);
     while p + 8 <= b.len() {
         let size = u32::from_be_bytes(b[p..p + 4].try_into().unwrap()) as usize;
@@ -58,7 +60,7 @@ fn render_all(plan: &unmoof::Plan, files: &[Vec<u8>]) -> u64 {
 fn main() {
     let runs: usize = std::env::args().nth(1).and_then(|a| a.parse().ok()).unwrap_or(15);
     let a = "testdata/aniboom720";
-    let mut ab: Vec<(usize, Vec<(u64, Vec<u8>)>)> = Vec::new();
+    let mut ab: Vec<(usize, Boxes)> = Vec::new();
     let mut ab_bytes = 0u64;
     for (src, (init, list)) in
         [("60d2572dd2dbe1_init_4.m4s", "media_4.m3u8"), ("60d2572dd2dbe1_init_1.m4s", "media_1.m3u8")]

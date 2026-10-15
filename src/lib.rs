@@ -111,6 +111,17 @@ impl Remuxer {
         Ok(())
     }
 
+    /// Plays media time `ticks / timescale` of a source at the start of the movie: the
+    /// `presentationTimeOffset` of DASH, which differs between video and audio in some manifests.
+    pub fn set_time_offset(&mut self, source: usize, ticks: i64, timescale: u32) -> Result<()> {
+        let Some(s) = self.sources.get_mut(source) else { bail!("source {source} was never opened") };
+        if timescale == 0 {
+            bail!("source {source}: a time offset needs a timescale above zero");
+        }
+        s.time_offset = ticks as f64 / timescale as f64;
+        Ok(())
+    }
+
     /// Tells the length of input file `file`. Samples that would lie past it are then refused
     /// while feeding, so a few damaged bytes cannot describe millions of samples.
     pub fn set_file_size(&mut self, file: u32, len: u64) {

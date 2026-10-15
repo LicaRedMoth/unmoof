@@ -1,7 +1,8 @@
 #![no_main]
 //! Several files over several sources, where the joins between fragments and segments live.
-//! The first byte picks the layout: bit 0 MP3 output, bits 1-2 how many sources. Then each file
-//! is a 3-byte length, a byte naming its source, and the bytes; each goes in as `sniff` says.
+//! The first byte picks the layout: bit 0 MP3 output, bits 1-2 how many sources, bit 3 a time
+//! offset for the last source in the next 12 bytes (ticks, timescale). Then each file is a 3-byte
+//! length, a byte naming its source, and the bytes; each goes in as `sniff` says.
 
 mod common;
 
@@ -12,6 +13,14 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     let mut rm = Remuxer::new();
     let n = 1 + ((cfg >> 1) & 3) as usize;
     let sources: Vec<usize> = (0..n).map(|_| rm.add_source()).collect();
+    if cfg & 8 != 0 && rest.len() >= 12 {
+        let ticks = i64::from_be_bytes(rest[..8].try_into().unwrap());
+        let timescale = u32::from_be_bytes(rest[8..12].try_into().unwrap());
+        rest = &rest[12..];
+        if rm.set_time_offset(sources[n - 1], ticks, timescale).is_err() {
+            return;
+        }
+    }
     let mut files: Vec<&[u8]> = Vec::new();
     while rest.len() >= 4 && files.len() < 16 {
         let len = (u32::from_be_bytes([0, rest[0], rest[1], rest[2]]) as usize).min(rest.len() - 4);

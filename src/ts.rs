@@ -360,7 +360,11 @@ fn h264_units(b: &[u8], marks: &[Mark]) -> Vec<Unit> {
     let mut out = Vec::with_capacity(starts.len());
     for (j, &k) in starts.iter().enumerate() {
         let from = nals[k].0;
-        let to = starts.get(j + 1).map(|&k2| nals[k2].0).unwrap_or(b.len());
+        let mut to = starts.get(j + 1).map(|&k2| nals[k2].0).unwrap_or(b.len());
+        // Zeros before a start code pad the byte stream; no NAL unit ends in one (H.264 7.4.1).
+        while to > from && b[to - 1] == 0 {
+            to -= 1;
+        }
         let mut data = Vec::with_capacity(to - from + 16);
         codec::annexb_to_avcc(&b[from..to], &mut data);
         if data.is_empty() {
@@ -542,4 +546,21 @@ fn packed_units(b: &[u8], es: Es) -> Result<(Vec<Vec<Unit>>, usize)> {
 /// The samples of a TS file, or of a packed audio segment when `packed`; see [`samples`].
 pub fn units(b: &[u8], pids: &[(Es, u16)], packed: bool) -> Result<(Vec<Vec<Unit>>, usize)> {
     if packed { packed_units(b, pids[0].0) } else { samples(b, pids) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zeros_between_pictures_belong_to_neither() {
+        // An IDR slice, a trailing_zero_8bits and a 4-byte start code, then the next picture.
+        let es = [0, 0, 0, 1, 0x65, 0x88, 0x81, 0, 0, 0, 0, 1, 0x09, 0xf0, 0, 0, 1, 0x41, 0x9a, 0x02];
+        let units = h264_units(&es, &[]);
+        let data: Vec<_> = units.iter().map(|u| u.data.clone()).collect();
+        assert_eq!(
+            data,
+            [vec![0, 0, 0, 3, 0x65, 0x88, 0x81], vec![0, 0, 0, 2, 0x09, 0xf0, 0, 0, 0, 3, 0x41, 0x9a, 0x02]]
+        );
+    }
 }

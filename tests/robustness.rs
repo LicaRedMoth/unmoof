@@ -24,6 +24,10 @@ fn cat(parts: &[Vec<u8>]) -> Vec<u8> {
 
 /// An init segment with one audio track, timescale 1000, whose samples default to 10 bytes.
 fn init() -> Vec<u8> {
+    init_with(1000)
+}
+
+fn init_with(timescale: u32) -> Vec<u8> {
     let mvhd = full(
         b"mvhd",
         0,
@@ -48,7 +52,7 @@ fn init() -> Vec<u8> {
         b"mdhd",
         0,
         0,
-        &[&[0u8; 8][..], &1000u32.to_be_bytes(), &[0u8; 4], &[0x55, 0xc4, 0, 0]].concat(),
+        &[&[0u8; 8][..], &timescale.to_be_bytes(), &[0u8; 4], &[0x55, 0xc4, 0, 0]].concat(),
     );
     let hdlr = full(b"hdlr", 0, 0, &[&[0u8; 4][..], b"soun", &[0u8; 13]].concat());
     let stsd = full(b"stsd", 0, 0, &[&1u32.to_be_bytes()[..], &bx(b"mp4a", &[0u8; 28])].concat());
@@ -125,6 +129,30 @@ fn decode_times_at_the_end_of_time_do_not_overflow() {
     ]);
     let _ = rm.feed(s, 0, 0, &data);
     plan_adds_up(rm);
+}
+
+#[test]
+fn tracks_that_start_ages_apart() {
+    // One track at zero, one 2^62 seconds later: the gap between them overflowed in milliseconds.
+    let mut rm = Remuxer::new();
+    let a = rm.add_source();
+    rm.feed(a, 0, 0, &cat(&[init(), fragment(0x02_0000, &[], 0, 4, 0)])).unwrap();
+    let b = rm.add_source();
+    rm.feed(b, 1, 0, &cat(&[init_with(1), fragment(0x02_0000, &[], 1 << 62, 4, 0)])).unwrap();
+    plan_adds_up(rm);
+}
+
+#[test]
+fn time_offsets_of_any_size() {
+    for ticks in [i64::MIN, -1, i64::MAX] {
+        let mut rm = Remuxer::new();
+        let a = rm.add_source();
+        rm.feed(a, 0, 0, &cat(&[init(), fragment(0x02_0000, &[], 0, 4, 0)])).unwrap();
+        let b = rm.add_source();
+        rm.feed(b, 1, 0, &cat(&[init(), fragment(0x02_0000, &[], 0, 4, 0)])).unwrap();
+        rm.set_time_offset(b, ticks, 1).unwrap();
+        plan_adds_up(rm);
+    }
 }
 
 #[test]

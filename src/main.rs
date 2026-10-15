@@ -15,6 +15,7 @@ usage: unmoof -o OUT.mp4 -s FILE... [-s FILE...]...
               its own, such as DASH audio, is another -s.
   --lang L    after -s: the language of that source's tracks (ISO 639-2: rus, jpn)
   --title T   after -s: a title for them, such as the studio of a dub
+  --pto T/S   after -s: the DASH presentationTimeOffset T of that source, in timescale S
   -o OUT      the file to write: an MP4, or with .mp3, the bare frames of an MP3 track
   --chunk MS  the longest a chunk may run, in milliseconds (default 500)";
 
@@ -28,23 +29,40 @@ fn main() -> ExitCode {
     }
 }
 
+/// What a -s carries besides its files.
+#[derive(Default)]
+struct Info {
+    lang: Option<String>,
+    title: Option<String>,
+    pto: Option<(i64, u32)>,
+}
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut out: Option<PathBuf> = None;
     let mut chunk_ms: Option<f64> = None;
     let mut sources: Vec<Vec<PathBuf>> = Vec::new();
-    let mut infos: Vec<(Option<String>, Option<String>)> = Vec::new();
+    let mut infos: Vec<Info> = Vec::new();
     let mut args = std::env::args_os().skip(1);
     while let Some(a) = args.next() {
         match a.to_str() {
             Some("-o") => out = Some(args.next().ok_or("-o needs a path")?.into()),
             Some("-s") => {
                 sources.push(Vec::new());
-                infos.push((None, None));
+                infos.push(Info::default());
             }
             Some(flag @ ("--lang" | "--title")) => {
                 let v = args.next().ok_or(format!("{flag} needs a value"))?.to_string_lossy().into_owned();
                 let info = infos.last_mut().ok_or(format!("{flag} must follow -s"))?;
-                if flag == "--lang" { info.0 = Some(v) } else { info.1 = Some(v) }
+                if flag == "--lang" { info.lang = Some(v) } else { info.title = Some(v) }
+            }
+            Some("--pto") => {
+                let v = args.next().ok_or("--pto needs TICKS/TIMESCALE")?;
+                let pto = v
+                    .to_str()
+                    .and_then(|v| v.split_once('/'))
+                    .and_then(|(t, s)| Some((t.parse().ok()?, s.parse().ok()?)))
+                    .ok_or("--pto needs TICKS/TIMESCALE, such as 1024/12288")?;
+                infos.last_mut().ok_or("--pto must follow -s")?.pto = Some(pto);
             }
             Some("--chunk") => {
                 let v = args.next().ok_or("--chunk needs milliseconds")?;
@@ -77,9 +95,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         rm.set_chunk_duration(ms / 1000.0);
     }
     let mut files: Vec<(PathBuf, u64)> = Vec::new();
-    for (group, (lang, title)) in sources.iter().zip(&infos) {
+    for (group, info) in sources.iter().zip(&infos) {
         let s = rm.add_source();
-        rm.set_track_info(s, lang.as_deref(), title.as_deref())?;
+        rm.set_track_info(s, info.lang.as_deref(), info.title.as_deref())?;
+        if let Some((ticks, timescale)) = info.pto {
+            rm.set_time_offset(s, ticks, timescale)?;
+        }
         for path in group {
             let id = files.len() as u32;
             let len = scan(&mut rm, s, id, path).map_err(|e| format!("{}: {e}", path.display()))?;

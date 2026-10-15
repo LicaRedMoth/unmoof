@@ -48,6 +48,8 @@ struct Scenario {
     name: &'static str,
     sources: Vec<Vec<Input>>,
     mp3: bool,
+    /// A time offset for one source: its index, ticks and timescale.
+    offset: Option<(usize, i64, u32)>,
 }
 
 fn marks_of(kind: Format, b: &[u8]) -> Vec<usize> {
@@ -193,7 +195,9 @@ fn scenarios() -> Vec<Scenario> {
     for (name, sources, mp3) in defs.drain(..) {
         let loaded: Option<Vec<Vec<Input>>> = sources.iter().map(|s| load(s)).collect();
         match loaded {
-            Some(s) if s.iter().all(|f| !f.is_empty()) => out.push(Scenario { name, sources: s, mp3 }),
+            Some(s) if s.iter().all(|f| !f.is_empty()) => {
+                out.push(Scenario { name, sources: s, mp3, offset: None })
+            }
             _ => eprintln!("skipping seed {name}: its test data is missing"),
         }
     }
@@ -294,6 +298,9 @@ fn run(s: &Scenario) -> Result<(), String> {
             file += 1;
         }
     }
+    if let Some((si, ticks, timescale)) = s.offset {
+        rm.set_time_offset(si, ticks, timescale).map_err(|e| e.to_string())?;
+    }
     let plan = if s.mp3 { rm.finish_mp3() } else { rm.finish() }.map_err(|e| e.to_string())?;
     let mut total = plan.header.len() as u64;
     for (i, p) in plan.pieces.iter().enumerate() {
@@ -325,13 +332,18 @@ fn save(dir: &Path, s: &Scenario, why: &str) {
     }
     let _ = std::fs::write(
         dir.join("README.txt"),
-        format!("seed scenario: {}\nmp3: {}\n{why}\n\n{cmd}\n", s.name, s.mp3),
+        format!("seed scenario: {}\nmp3: {}\noffset: {:?}\n{why}\n\n{cmd}\n", s.name, s.mp3, s.offset),
     );
 }
 
 fn replay(dir: &Path) {
     let readme = std::fs::read_to_string(dir.join("README.txt")).expect("no README.txt in the case");
     let mp3 = readme.lines().any(|l| l == "mp3: true");
+    let offset = readme.lines().find_map(|l| {
+        let v = l.strip_prefix("offset: Some((")?.strip_suffix("))")?;
+        let mut it = v.split(", ");
+        Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?, it.next()?.parse().ok()?))
+    });
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .unwrap()
         .filter_map(|e| e.ok())
@@ -358,7 +370,7 @@ fn replay(dir: &Path) {
         };
         sources[si].push(Input { kind, bytes, marks: Vec::new(), name: orig });
     }
-    let s = Scenario { name: "replay", sources, mp3 };
+    let s = Scenario { name: "replay", sources, mp3, offset };
     let t = Instant::now();
     println!("{:?} in {:?}", run(&s), t.elapsed());
 }
@@ -405,6 +417,12 @@ fn main() {
             if n > 1 {
                 s.sources[src].swap(rng.below(n), rng.below(n));
             }
+        }
+        if rng.chance(10) {
+            let pick = |rng: &mut Rng| INTERESTING[rng.below(INTERESTING.len())];
+            let ticks =
+                if rng.chance(50) { pick(&mut rng) as i64 } else { (pick(&mut rng) as i64).wrapping_neg() };
+            s.offset = Some((rng.below(s.sources.len()), ticks, pick(&mut rng) as u32));
         }
         let donor = {
             let a = &seeds[rng.below(seeds.len())];

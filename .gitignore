@@ -10,3 +10,4 @@
 /fuzz/artifacts
 /fuzz/coverage
 /fuzz/logs
+tools/__pycache__/

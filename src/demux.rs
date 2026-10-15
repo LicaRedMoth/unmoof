@@ -19,6 +19,8 @@ pub struct Source {
     /// Language and title the caller knows from the playlist, for every track of the source.
     pub language: Option<u16>,
     pub title: Option<String>,
+    /// Seconds the caller's manifest moves the source earlier: DASH `presentationTimeOffset`.
+    pub time_offset: f64,
     /// Set when the source is subtitles.
     pub subs: Option<SubSource>,
 }
