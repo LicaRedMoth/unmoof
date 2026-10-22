@@ -1,6 +1,5 @@
-//! Speed of the core on four workloads, all inputs in memory, for comparing builds:
+//! Speed of the core on four workloads, inputs in memory; wasm/bench.mjs runs the same ones.
 //!   cargo run --release --example bench -- RUNS
-//! wasm/bench.mjs runs the same workloads through unmoof.wasm; the `out` column must match.
 
 use std::path::Path;
 use std::time::Instant;

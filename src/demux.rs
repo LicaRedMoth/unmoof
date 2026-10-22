@@ -137,9 +137,8 @@ impl Track {
         &self.handler == b"soun"
     }
 
-    /// Puts the frames of a fixed-frame audio codec back on their grid: packagers that came from
-    /// MPEG-TS round frame times, and strict players stutter on the wobble. A step of more than
-    /// half a frame is a real gap. Returns the largest correction in seconds, if any.
+    /// Puts fixed-size audio frames back on their grid, which packagers from TS round off; a step
+    /// over half a frame is a real gap. Returns the largest correction in seconds, if any.
     pub fn snap_audio(&mut self) -> Option<f64> {
         if !self.is_audio() || !matches!(&self.codec, b"mp4a" | b"ac-3" | b"ec-3") || self.samples.len() < 2 {
             return None;

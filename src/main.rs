@@ -155,7 +155,7 @@ fn scan(rm: &mut Remuxer, source: usize, id: u32, path: &Path) -> Result<u64, Bo
         let n = (len - pos).min(16) as usize;
         f.seek(SeekFrom::Start(pos))?;
         f.read_exact(&mut head[..n])?;
-        let Some((typ, _, size)) = unmoof_header(&head[..n]) else {
+        let Some((typ, _, size)) = unmoof::box_header(&head[..n]) else {
             return Err(Error(format!("a box header at byte {pos} is cut short")).into());
         };
         let size = size.unwrap_or(len - pos);
@@ -179,20 +179,6 @@ fn scan(rm: &mut Remuxer, source: usize, id: u32, path: &Path) -> Result<u64, Bo
         pos += size;
     }
     Ok(len)
-}
-
-fn unmoof_header(b: &[u8]) -> Option<([u8; 4], usize, Option<u64>)> {
-    if b.len() < 8 {
-        return None;
-    }
-    let size = u32::from_be_bytes(b[0..4].try_into().unwrap()) as u64;
-    let typ: [u8; 4] = b[4..8].try_into().unwrap();
-    match size {
-        0 => Some((typ, 8, None)),
-        1 if b.len() >= 16 => Some((typ, 16, Some(u64::from_be_bytes(b[8..16].try_into().unwrap())))),
-        1 => None,
-        _ => Some((typ, 8, Some(size))),
-    }
 }
 
 fn write(plan: &Plan, files: &[(PathBuf, u64)], to: &Path) -> io::Result<()> {

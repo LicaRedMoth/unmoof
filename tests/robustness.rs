@@ -1,5 +1,5 @@
-//! Damaged input that once made unmoof panic, overflow or try to allocate gigabytes, built here
-//! byte by byte so the cases need no media files. Each must now end in a clean `Err` or a plan.
+//! Input built byte by byte that once made unmoof panic, overflow, hang or mistime a stream;
+//! each must now end in a clean `Err` or a right plan.
 
 use std::time::{Duration, Instant};
 
@@ -280,24 +280,10 @@ fn adts(len: usize) -> Vec<u8> {
     f
 }
 
-/// A TS file of H.264 pictures on PID 0x100, one PES each with the PTS and DTS given (an IDR
-/// picture with a 320x240 Baseline SPS and PPS first, then P pictures), and AAC on PID 0x101,
-/// a PES of two frames at each time given.
+/// A TS file: H.264 on PID 0x100, a PES per (PTS, DTS), an IDR picture with its SPS first; AAC
+/// on PID 0x101, a PES of two frames per time.
 fn ts_file(pictures: &[(u64, u64)], audio: &[u64]) -> Vec<u8> {
-    let mut w = BitWriter::default();
-    w.put(66, 8);
-    w.put(0, 8);
-    w.put(30, 8);
-    w.ue(0); // sps id
-    w.ue(0); // log2_max_frame_num_minus4
-    w.ue(2); // pic_order_cnt_type
-    w.ue(1); // max_num_ref_frames
-    w.put(0, 1);
-    w.ue(19); // pic_width_in_mbs_minus1
-    w.ue(14); // pic_height_in_map_units_minus1
-    w.put(1, 1); // frame_mbs_only
-    w.put(0, 2);
-    let sps = w.bytes();
+    let sps = baseline_sps(19, 14);
     let pat = [0, 0x00, 0xb0, 13, 0, 1, 0xc1, 0, 0, 0, 1, 0xf0, 0x00, 0, 0, 0, 0];
     let mut streams = Vec::new();
     if !pictures.is_empty() {
@@ -447,9 +433,8 @@ impl BitWriter {
     }
 }
 
-#[test]
-fn sps_with_an_absurd_picture_size() {
-    // Baseline SPS whose width in macroblocks is just under 2^32.
+/// The RBSP of a Baseline SPS of the size given in macroblocks less one, frames only.
+fn baseline_sps(width_mbs_minus1: u64, height_mbs_minus1: u64) -> Vec<u8> {
     let mut w = BitWriter::default();
     w.put(66, 8);
     w.put(0, 8);
@@ -459,11 +444,17 @@ fn sps_with_an_absurd_picture_size() {
     w.ue(2); // pic_order_cnt_type
     w.ue(1); // max_num_ref_frames
     w.put(0, 1);
-    w.ue(u64::from(u32::MAX) - 1); // pic_width_in_mbs_minus1
-    w.ue(10);
+    w.ue(width_mbs_minus1);
+    w.ue(height_mbs_minus1);
     w.put(1, 1); // frame_mbs_only
     w.put(0, 2);
-    let sps = w.bytes();
+    w.bytes()
+}
+
+#[test]
+fn sps_with_an_absurd_picture_size() {
+    // Baseline SPS whose width in macroblocks is just under 2^32.
+    let sps = baseline_sps(u64::from(u32::MAX) - 1, 10);
     let mut es = vec![0, 0, 0, 1, 0x67];
     es.extend_from_slice(&sps);
     es.extend_from_slice(&[0, 0, 0, 1, 0x68, 0xce, 0x38, 0x80, 0, 0, 0, 1, 0x65, 0x88, 0x84]);

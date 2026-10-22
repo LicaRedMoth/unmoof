@@ -43,53 +43,42 @@ for (let i = 0; i < 50000; i++) srt += `${i + 1}\n${clock(i * 700)} --> ${clock(
 const srtBytes = new TextEncoder().encode(srt);
 const sum = (v) => v.reduce((n, b) => n + b.length, 0);
 
-function renderAll(plan, files) {
-  let n = plan.header.length;
-  plan.pieces.forEach((p, i) => {
-    n += p.render ? plan.render(i, files[p.render.file]).length : p.copy ? p.copy.len : p.data.len;
-  });
+// Feeds a fresh remuxer, finishes it, and returns the size of the file: with `files`, the TS
+// pieces are rendered from them, as a writer would.
+function remux(feed, { mp3 = false, files = null } = {}) {
+  const rm = um.remuxer();
+  feed(rm);
+  const plan = mp3 ? rm.finishMp3() : rm.finish();
+  rm.free();
+
+  let n = plan.size;
+  if (files) {
+    n = plan.header.length;
+    plan.pieces.forEach((p, i) => {
+      n += p.render ? plan.render(i, files[p.render.file]).length : p.copy ? p.copy.len : p.data.len;
+    });
+  }
   plan.free();
   return n;
 }
 
 const work = [
-  ['fmp4 episode plan', abBytes, () => {
-    const rm = um.remuxer();
+  ['fmp4 episode plan', abBytes, () => remux((rm) => {
     rm.addSource();
     rm.addSource();
     ab.forEach(([src, bx], id) => bx.forEach(([off, b]) => rm.feed(src, id, off, b)));
-    const plan = rm.finish();
-    rm.free();
-    const size = plan.size;
-    plan.free();
-    return size;
-  }],
-  ['ts 1080p remux', sum(ts), () => {
-    const rm = um.remuxer();
+  })],
+  ['ts 1080p remux', sum(ts), () => remux((rm) => {
     const s = rm.addSource();
     ts.forEach((f, i) => rm.feedTs(s, i, f));
-    const plan = rm.finish();
-    rm.free();
-    return renderAll(plan, ts);
-  }],
-  ['ts mp3 to .mp3', sum(vk), () => {
-    const rm = um.remuxer();
+  }, { files: ts })],
+  ['ts mp3 to .mp3', sum(vk), () => remux((rm) => {
     const s = rm.addSource();
     vk.forEach((f, i) => rm.feedTs(s, i, f));
-    const plan = rm.finishMp3();
-    rm.free();
-    return renderAll(plan, vk);
-  }],
-  ['50k subtitle cues', srtBytes.length, () => {
-    const rm = um.remuxer();
-    const s = rm.addSource();
-    rm.feedSubtitles(s, srtBytes);
-    const plan = rm.finish();
-    rm.free();
-    const size = plan.size;
-    plan.free();
-    return size;
-  }],
+  }, { mp3: true, files: vk })],
+  ['50k subtitle cues', srtBytes.length, () => remux((rm) => {
+    rm.feedSubtitles(rm.addSource(), srtBytes);
+  })],
 ];
 
 console.log('workload\truns\tmin ms\tmedian ms\tmax ms\tinput MB\tMB/s\tout');

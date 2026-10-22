@@ -1,7 +1,6 @@
 #!/bin/bash
-# Remuxes every test stream in testdata/ and checks the result packet by packet.
-# Synthetic streams are checked against the file they were cut from; downloaded ones against
-# ffmpeg's remux of the same segments (`-c copy`).
+# Remuxes every test stream in testdata/ and checks it packet by packet: synthetic streams
+# against the file they were cut from, downloaded ones against ffmpeg's -c copy remux.
 set -u
 cd "$(dirname "$0")/.."
 U=target/release/unmoof
@@ -73,9 +72,8 @@ for d in $T/public/*/; do
     $U -o "$O/$k.mp4" "${args[@]}" 2>/dev/null
     ffmpeg -v error -y "${refin[@]}" "${maps[@]}" -c copy -f mp4 "$O/${k}_ref.mp4"
     rm -f "$O/$k".*.tmp
-    # ffmpeg starts video at its first decode time; unmoof at its first presentation time, as
-    # the fragments state it. Streams that start video on a positive composition offset with no
-    # edit list name the difference in sync_ms.
+    # ffmpeg starts video at its first decode time, unmoof at its first presentation time; where
+    # a stream starts on a composition offset with no edit list, sync_ms names the difference.
     check "$k" "$O/${k}_ref.mp4" "$O/$k.mp4" $(cat "$d/sync_ms" 2>/dev/null)
     rm -f "$O/$k.mp4" "$O/${k}_ref.mp4"
 done

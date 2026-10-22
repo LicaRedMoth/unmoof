@@ -2,8 +2,14 @@
 name = "unmoof"
 version = "0.1.0"
 edition = "2024"
-description = "Rebuilds fragmented MP4 (HLS/DASH fMP4) as a progressive MP4 with the moov first, without copying sample data"
+description = "Remuxes HLS and DASH segments (fMP4, MPEG-TS, packed audio, subtitles) into one progressive MP4"
 license = "MIT"
+authors = ["RedMoth"]
+repository = "https://github.com/LicaRedMoth/unmoof"
+readme = "README.md"
+keywords = ["hls", "dash", "mp4", "remux", "wasm"]
+categories = ["multimedia::video", "multimedia::audio", "wasm"]
+exclude = ["/tools", "/fuzz", "/wasm", "/examples/fuzz.rs"]
 
 [lib]
 path = "src/lib.rs"

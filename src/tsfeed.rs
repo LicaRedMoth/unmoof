@@ -139,9 +139,8 @@ impl Remuxer {
             }
         }
 
-        // A clock that does not go on from the last file (a discontinuity, a missing segment)
-        // is shifted so the file shows right after the last frame shown. It jumps when every
-        // stream jumps: a muxer may carry audio well ahead of the video, each going on in step.
+        // When every stream's clock jumps from the last file, the file is shifted to follow it;
+        // one stream alone is no jump, as muxers may carry audio well ahead of the video.
         let times: Vec<(usize, i64, i64)> = units
             .iter()
             .enumerate()
@@ -352,7 +351,7 @@ impl Remuxer {
                     return Some(ti);
                 }
                 st.adts[i] = Some(a);
-                Some(self.add_audio_track(source, i, a.rate(), codec::mp4a_stsd(&a, 0), st))
+                Some(self.add_audio_track(source, i, a.rate(), codec::aac_stsd(&a, 0), st))
             }
             Es::Mpa => {
                 let m = u.mpa?;
@@ -436,9 +435,8 @@ fn mend_picture_times(list: &mut [ts::Unit]) -> (usize, i64) {
 }
 
 impl Track {
-    /// Durations of video read from MPEG-TS, which states times only: each frame lasts until
-    /// the next one is decoded, the last as long as the one before it. Audio frames last a frame,
-    /// except before a gap in the stream, so the audio after the gap keeps its time.
+    /// Durations from TS times: a picture lasts until the next is decoded, the last like the one
+    /// before; an audio frame lasts a frame, or up to the next frame across a gap.
     pub fn close_ts(&mut self, warnings: &mut Vec<String>) {
         if self.ts_stream.is_none() {
             return;

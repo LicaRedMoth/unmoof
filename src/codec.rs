@@ -638,58 +638,48 @@ impl Mpa {
 /// An `stsd` holding one `mp4a` sample entry for MPEG audio: object type 0x6b for MPEG-1,
 /// 0x69 for MPEG-2, and no decoder specific info.
 pub fn mpa_stsd(m: &Mpa) -> Vec<u8> {
-    let mut w = Wr::default();
-    let stsd = w.open_full(b"stsd", 0, 0);
-    w.u32(1);
-    let entry = w.open(b"mp4a");
-    w.zeros(6);
-    w.u16(1);
-    w.zeros(8);
-    w.u16(m.channels as u16);
-    w.u16(16);
-    w.u32(0);
-    w.u32(m.rate << 16);
-    let esds = w.open_full(b"esds", 0, 0);
-    w.bytes(&[0x03, 3 + 2 + 13 + 3]);
-    w.u16(0);
-    w.bytes(&[0, 0x04, 13, if m.version == 1 { 0x6b } else { 0x69 }, 0x15, 0, 0, 0]);
-    w.u32(0);
-    w.u32(0);
-    w.bytes(&[0x06, 1, 2]);
-    w.close(esds);
-    w.close(entry);
-    w.close(stsd);
-    w.v
+    mp4a_stsd(m.channels as u16, m.rate, 0, if m.version == 1 { 0x6b } else { 0x69 }, &[])
 }
 
 /// An `stsd` holding one `mp4a` sample entry for the AAC the ADTS headers describe.
-pub fn mp4a_stsd(a: &Adts, es_id: u16) -> Vec<u8> {
-    let asc = [(a.object_type << 3) | (a.freq_index >> 1), ((a.freq_index & 1) << 7) | (a.channels << 3)];
+pub fn aac_stsd(a: &Adts, es_id: u16) -> Vec<u8> {
+    let config = [(a.object_type << 3) | (a.freq_index >> 1), ((a.freq_index & 1) << 7) | (a.channels << 3)];
+    let channels = if a.channels == 0 { 2 } else { a.channels as u16 };
+    mp4a_stsd(channels, a.rate(), es_id, 0x40, &config)
+}
+
+/// An `stsd` with one `mp4a` entry: an `esds` naming the object type, with the decoder
+/// specific info when there is any (ISO 14496-1 7.2.6).
+fn mp4a_stsd(channels: u16, rate: u32, es_id: u16, object_type: u8, info: &[u8]) -> Vec<u8> {
     let mut w = Wr::default();
     let stsd = w.open_full(b"stsd", 0, 0);
     w.u32(1);
     let entry = w.open(b"mp4a");
     w.zeros(6);
-    w.u16(1);
+    w.u16(1); // data reference index
     w.zeros(8);
-    w.u16(if a.channels == 0 { 2 } else { a.channels as u16 });
-    w.u16(16);
+    w.u16(channels);
+    w.u16(16); // sample size
     w.u32(0);
-    w.u32(a.rate() << 16);
+    w.u32(rate << 16);
+
+    let info_len = if info.is_empty() { 0 } else { 2 + info.len() };
+    let config_len = 13 + info_len;
+    let es_len = 3 + 2 + config_len + 3;
     let esds = w.open_full(b"esds", 0, 0);
-    let dsi_len = 2;
-    let dcd_len = 13 + 2 + dsi_len;
-    let es_len = 3 + 2 + dcd_len + 3;
     w.bytes(&[0x03, es_len as u8]);
     w.u16(es_id);
-    w.bytes(&[0, 0x04, dcd_len as u8, 0x40, 0x15]);
+    w.bytes(&[0, 0x04, config_len as u8, object_type, 0x15]);
     w.bytes(&[0, 0, 0]); // buffer size
     w.u32(0); // max bitrate: not known
     w.u32(0); // average bitrate: not known
-    w.bytes(&[0x05, dsi_len as u8]);
-    w.bytes(&asc);
+    if !info.is_empty() {
+        w.bytes(&[0x05, info.len() as u8]);
+        w.bytes(info);
+    }
     w.bytes(&[0x06, 1, 2]);
     w.close(esds);
+
     w.close(entry);
     w.close(stsd);
     w.v

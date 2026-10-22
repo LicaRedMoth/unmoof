@@ -1,8 +1,5 @@
-//! The WebAssembly face of unmoof: plain exported functions over handles and byte buffers, so
-//! the module needs no binding generator. `unmoof.js` wraps them.
-//!
-//! Calls that can fail return 0 on success and 1 on failure; the message of a failure, like the
-//! bytes a call makes, waits in the handle's buffer (`*_buf_ptr`, `*_buf_len`) until the next call.
+//! unmoof as plain WebAssembly exports over handles and byte buffers, wrapped by `unmoof.js`.
+//! Calls return 0 or 1 for failure; messages and made bytes wait in the handle's buffer.
 
 use std::fmt::Write as _;
 
@@ -139,7 +136,12 @@ pub unsafe extern "C" fn unmoof_set_track_info(
 /// # Safety
 /// `h` must come from `unmoof_new`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn unmoof_set_time_offset(h: *mut RState, source: u32, ticks: f64, timescale: u32) -> u32 {
+pub unsafe extern "C" fn unmoof_set_time_offset(
+    h: *mut RState,
+    source: u32,
+    ticks: f64,
+    timescale: u32,
+) -> u32 {
     let st = unsafe { &mut *h };
     let Some(rm) = st.rm.as_mut() else { return fail(&mut st.buf, "the remuxer has finished") };
     match rm.set_time_offset(source as usize, ticks as i64, timescale) {

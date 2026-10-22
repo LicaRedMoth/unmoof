@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  ascii:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Plain ASCII everywhere; Cyrillic stays allowed for the tests of Russian subtitles.
+      - name: No characters outside ASCII and Cyrillic
+        run: |
+          if git grep -n -I -P '[^\x00-\x7F\x{0400}-\x{04FF}]' -- .; then
+            exit 1
+          fi
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      - run: cargo build --release
+      - name: The stable fuzzer builds
+        run: cargo build --profile fuzz --example fuzz
+
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+      - working-directory: wasm
+        run: cargo fmt --check
+      - working-directory: wasm
+        run: cargo clippy --target wasm32-unknown-unknown -- -D warnings
+      - working-directory: wasm
+        run: cargo build --release --target wasm32-unknown-unknown
+
+  tools:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The Python tools compile
+        run: python3 -m py_compile tools/*.py
+      - name: The shell tools parse
+        run: for f in tools/*.sh; do bash -n "$f"; done

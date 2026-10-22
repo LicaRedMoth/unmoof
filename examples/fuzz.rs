@@ -1,11 +1,7 @@
-//! A mutation fuzzer on stable Rust: real test streams, damaged at random, fed through the whole
-//! pipeline (feed, finish, render) until something panics, overflows or hangs.
-//!
+//! A mutation fuzzer on stable Rust: real streams, damaged at random, through feed, finish and
+//! render; the fuzz profile keeps overflow checks on. Each failure is saved with a replay command.
 //!   cargo run --profile fuzz --example fuzz -- SECONDS [SEED]
 //!   cargo run --profile fuzz --example fuzz -- --replay out/fuzz/<case>
-//!
-//! The `fuzz` profile keeps overflow checks on, so arithmetic that wraps in release counts as a
-//! failure. Each failure is saved once per panic location, with its inputs and a replay command.
 
 use std::cell::RefCell;
 use std::panic;

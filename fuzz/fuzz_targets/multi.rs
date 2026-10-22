@@ -1,8 +1,6 @@
 #![no_main]
-//! Several files over several sources, where the joins between fragments and segments live.
-//! The first byte picks the layout: bit 0 MP3 output, bits 1-2 how many sources, bit 3 a time
-//! offset for the last source in the next 12 bytes (ticks, timescale). Then each file is a 3-byte
-//! length, a byte naming its source, and the bytes; each goes in as `sniff` says.
+//! Several files over several sources. Byte 0: bit 0 MP3 output, bits 1-2 sources, bit 3 a time
+//! offset (12 bytes) for the last source; then per file a 3-byte length, a source byte, the bytes.
 
 mod common;
 

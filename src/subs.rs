@@ -1,6 +1,5 @@
-//! Subtitles: SubRip, WebVTT and ASS/SSA read into cues, then written as one 3GPP timed text
-//! (`tx3g`) track, the text track MP4 players show. Bold, italic and underline survive; ASS
-//! positions, colours and effects cannot be carried and are dropped.
+//! SubRip, WebVTT and ASS/SSA read into cues and written as a `tx3g` text track. Bold, italic
+//! and underline survive; ASS positions, colours and effects are dropped.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap};
@@ -328,9 +327,8 @@ pub fn parse(b: &[u8]) -> Result<(Kind, Vec<Cue>, bool)> {
     })
 }
 
-/// One `tx3g` sample per stretch of time in which the same cues show. Cues that overlap, as
-/// signs and dialogue do in ASS, share the screen one above the other. Returns
-/// (start ms, duration ms, sample bytes), starting at `from`.
+/// One `tx3g` sample (start ms, duration ms, bytes) per stretch in which the same cues show,
+/// from `from` on; overlapping cues share the screen one above the other.
 pub fn samples(cues: &[Cue], from: i64) -> Vec<(i64, u32, Vec<u8>)> {
     let mut edges: Vec<i64> = cues.iter().flat_map(|c| [c.start, c.end]).filter(|&t| t >= from).collect();
     edges.push(from);

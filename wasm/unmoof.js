@@ -1,14 +1,4 @@
-// unmoof.js: loads unmoof.wasm and wraps it. Works in browsers, extensions and Node.
-//
-//   const um = await init(await fetch('unmoof.wasm'));
-//   const rm = um.remuxer();
-//   const v = rm.addSource();
-//   for (const [i, f] of files.entries()) await rm.feedFile(v, i, f.size, (o, n) => read(f, o, n));
-//   const plan = rm.finish();
-//   // the file is plan.header, then each of plan.pieces in order:
-//   //   { copy: { file, offset, len } }  bytes of input file `file`, as they are
-//   //   { render: { file, len, index } } plan.render(index, wholeTsFile)
-//   //   { data: { len, index } }         plan.data(index), bytes made by unmoof (subtitles)
+// Loads unmoof.wasm and wraps it, for browsers, extensions and Node; README.md shows its use.
 
 /** Loads the module from a Response, URL, ArrayBuffer, typed array or WebAssembly.Module. */
 export async function init(source) {
@@ -125,9 +115,8 @@ class Remuxer {
   }
 
   /**
-   * Feeds input file `file` of `size` bytes, reading only what is needed: the moov and moof boxes
-   * of fMP4, or the whole of other files. `readAt(offset, length)` resolves to the bytes.
-   * Returns the kind of file, as `sniff` names it.
+   * Feeds input file `file` of `size` bytes through `readAt(offset, length)`, reading only the
+   * moov and moof boxes of fMP4. Returns the kind of file, as `sniff` names it.
    */
   async feedFile(source, file, size, readAt) {
     this.#um.x.unmoof_set_file_size(this.#h, file, size);

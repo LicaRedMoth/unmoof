@@ -1,10 +1,4 @@
-//! unmoof turns the segments of an HLS or DASH stream (fMP4, MPEG-TS, packed audio, subtitles)
-//! into one MP4 with the `moov` first, the layout every player can seek and stream, or into a
-//! bare `.mp3`.
-//!
-//! The result is a [`Plan`]: a header, then pieces that are byte ranges of the inputs, samples to
-//! cut out of a TS file ([`Plan::render`]), or bytes made here. fMP4 samples are never copied
-//! into memory, so in a browser most of the file is `Blob.slice` calls on files on disk.
+#![doc = include_str!("../README.md")]
 
 mod bytes;
 mod codec;
@@ -14,6 +8,7 @@ mod subs;
 mod ts;
 mod tsfeed;
 
+pub use bytes::header as box_header;
 pub use mux::{Piece, Plan, Range, TrackReport};
 
 /// What a file holds, judged from its first bytes.
@@ -64,11 +59,8 @@ macro_rules! bail {
 }
 pub(crate) use bail;
 
-/// Collects the tracks and samples of one or more sources, then lays out the progressive file.
-///
-/// A source is one stream in any number of files: an fMP4 init segment and its media segments,
-/// TS segments, packed audio or subtitles. Audio delivered on its own, as in DASH, is another
-/// source. Track IDs of sources may clash; the output numbers its tracks itself.
+/// Collects the tracks of one or more sources, then lays out the file. A source is one stream
+/// in any number of files; DASH audio is a source of its own, and track IDs may clash.
 #[derive(Default)]
 pub struct Remuxer {
     sources: Vec<demux::Source>,
@@ -150,9 +142,8 @@ impl Remuxer {
         self.read_ts(source, file, data)
     }
 
-    /// Reads a SubRip, WebVTT or ASS/SSA file into the source's text track. Times count from the
-    /// start of the movie, unless a WebVTT file carries the `X-TIMESTAMP-MAP` of HLS, which ties
-    /// it to the clock of the stream. The files of segmented WebVTT join into one track.
+    /// Reads SubRip, WebVTT or ASS/SSA into the source's text track. Times count from the movie's
+    /// start, unless WebVTT carries the HLS `X-TIMESTAMP-MAP`; segmented WebVTT joins up.
     pub fn feed_subtitles(&mut self, source: usize, data: &[u8]) -> Result<()> {
         let Some(s) = self.sources.get_mut(source) else { bail!("source {source} was never opened") };
         if s.moov.is_some() || s.ts.is_some() {
@@ -169,10 +160,8 @@ impl Remuxer {
         Ok(())
     }
 
-    /// Reads the boxes in `data`, which starts at byte `offset` of input file `file`.
-    ///
-    /// `data` holds whole top-level boxes. Only `moov` and `moof` are read, so a caller may hand
-    /// those over alone and skip the `mdat` bodies. Fragments must come in decode order.
+    /// Reads whole top-level boxes starting at byte `offset` of input file `file`. Only `moov`
+    /// and `moof` matter, so a caller may skip the `mdat`s; fragments come in decode order.
     pub fn feed(&mut self, source: usize, file: u32, offset: u64, data: &[u8]) -> Result<()> {
         if source >= self.sources.len() {
             bail!("source {source} was never opened");

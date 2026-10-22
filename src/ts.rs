@@ -1,8 +1,5 @@
-//! MPEG-TS input (H.264, HEVC, AAC, MPEG audio) and HLS packed audio (bare frames behind an ID3 tag).
-//!
-//! TS samples lie scattered over 188-byte packets, so a file is read twice: once for the sample
-//! tables, once more to cut the samples out ([`crate::Plan::render`]). Both readings go through
-//! [`units`], so they agree on every sample.
+//! MPEG-TS (H.264, HEVC, AAC, MPEG audio) and HLS packed audio. A file is read twice, for the
+//! sample tables and to cut the samples out, both through [`units`], so the two agree.
 
 use crate::codec::{self, Adts, Mpa};
 use crate::{Result, bail};
@@ -271,9 +268,8 @@ pub fn streams(b: &[u8]) -> Result<(Pids, Vec<u8>)> {
     Ok((read, skipped))
 }
 
-/// The samples of every stream of `pids` in a TS file, per stream, in decode order; `pids` also
-/// stands in for a missing PMT. A PES need not start on a frame (old Apple segmenters cut
-/// anywhere), so the PES are joined first; a PES time belongs to the first frame starting in it.
+/// The samples of each stream of `pids`, which stands in for a missing PMT. PES are joined
+/// first, as old segmenters cut anywhere; a PES time is the first frame's that starts in it.
 pub fn samples(b: &[u8], pids: &[(Es, u16)]) -> Result<(Vec<Vec<Unit>>, usize)> {
     let known: Vec<(u8, u16)> = pids.iter().map(|&(e, pid)| (e.stream_type(), pid)).collect();
     let d = read_ts(b, &known)?;
@@ -290,8 +286,8 @@ pub fn samples(b: &[u8], pids: &[(Es, u16)]) -> Result<(Vec<Vec<Unit>>, usize)> 
         out.push(match pids[i].0 {
             Es::H264 => video_units(buf, marks, false),
             Es::H265 => video_units(buf, marks, true),
-            Es::Aac => aac_units(buf, marks, &mut broken),
-            Es::Mpa => mpa_units(buf, marks, &mut broken),
+            Es::Aac => audio_units(buf, marks, &mut broken, false),
+            Es::Mpa => audio_units(buf, marks, &mut broken, true),
         });
     }
     Ok((out, broken))
@@ -405,18 +401,33 @@ fn video_units(b: &[u8], marks: &[Mark], hevc: bool) -> Vec<Unit> {
     out
 }
 
-fn aac_units(b: &[u8], marks: &[Mark], broken: &mut usize) -> Vec<Unit> {
+/// A frame header at the start of `b`: where its sample starts and ends, and the header. ADTS
+/// headers are left out of the sample; MP4 stores MPEG audio frames whole.
+fn audio_frame(b: &[u8], mpa: bool) -> Option<(usize, usize, Option<Adts>, Option<Mpa>)> {
+    if mpa {
+        let m = Mpa::parse(b)?;
+        Some((0, m.frame_len, None, Some(m)))
+    } else {
+        let a = Adts::parse(b)?;
+        Some((a.header_len, a.frame_len, Some(a), None))
+    }
+}
+
+/// The frames of AAC in ADTS, or of MPEG audio when `mpa` is set. ID3 tags between them are
+/// skipped, and each stretch of anything else counts once in `broken`.
+fn audio_units(b: &[u8], marks: &[Mark], broken: &mut usize, mpa: bool) -> Vec<Unit> {
+    let header_len = if mpa { 4 } else { 7 };
     let mut clock = Clock { marks, used: 0 };
     let mut out = Vec::new();
     let (mut base, mut k) = (None, 0u32);
     let mut p = 0;
     let mut junk = false;
-    while p + 7 <= b.len() {
+    while p + header_len <= b.len() {
         if let Some(n) = id3_len(&b[p..]) {
             p += n;
             continue;
         }
-        let Some(a) = Adts::parse(&b[p..]) else {
+        let Some((from, len, adts, mpa_header)) = audio_frame(&b[p..], mpa) else {
             if !junk {
                 *broken += 1;
                 junk = true;
@@ -425,9 +436,10 @@ fn aac_units(b: &[u8], marks: &[Mark], broken: &mut usize) -> Vec<Unit> {
             continue;
         };
         junk = false;
-        if p + a.frame_len > b.len() {
+        if p + len > b.len() {
             break; // cut off by the end of the file
         }
+
         match clock.at(p) {
             (Some(m), true) if m.pts.is_some() => {
                 base = m.pts;
@@ -439,57 +451,12 @@ fn aac_units(b: &[u8], marks: &[Mark], broken: &mut usize) -> Vec<Unit> {
             pts: base,
             dts: base,
             frame_in_pes: k,
-            data: b[p + a.header_len..p + a.frame_len].to_vec(),
+            data: b[p + from..p + len].to_vec(),
             sync: true,
-            adts: Some(a),
-            mpa: None,
+            adts,
+            mpa: mpa_header,
         });
-        p += a.frame_len;
-    }
-    out
-}
-
-/// MPEG audio frames; unlike ADTS the sample keeps its header, as MP4 stores MP3 frames whole.
-fn mpa_units(b: &[u8], marks: &[Mark], broken: &mut usize) -> Vec<Unit> {
-    let mut clock = Clock { marks, used: 0 };
-    let mut out = Vec::new();
-    let (mut base, mut k) = (None, 0u32);
-    let mut p = 0;
-    let mut junk = false;
-    while p + 4 <= b.len() {
-        if let Some(n) = id3_len(&b[p..]) {
-            p += n;
-            continue;
-        }
-        let Some(m) = Mpa::parse(&b[p..]) else {
-            if !junk {
-                *broken += 1;
-                junk = true;
-            }
-            p += 1;
-            continue;
-        };
-        junk = false;
-        if p + m.frame_len > b.len() {
-            break;
-        }
-        match clock.at(p) {
-            (Some(mk), true) if mk.pts.is_some() => {
-                base = mk.pts;
-                k = 0;
-            }
-            _ => k += 1,
-        }
-        out.push(Unit {
-            pts: base,
-            dts: base,
-            frame_in_pes: k,
-            data: b[p..p + m.frame_len].to_vec(),
-            sync: true,
-            adts: None,
-            mpa: Some(m),
-        });
-        p += m.frame_len;
+        p += len;
     }
     out
 }
@@ -560,8 +527,8 @@ fn packed_units(b: &[u8], es: Es) -> Result<(Vec<Vec<Unit>>, usize)> {
     let mut broken = 0;
     let rest = &b[at.min(b.len())..];
     let units = match es {
-        Es::Aac => aac_units(rest, &marks, &mut broken),
-        Es::Mpa => mpa_units(rest, &marks, &mut broken),
+        Es::Aac => audio_units(rest, &marks, &mut broken, false),
+        Es::Mpa => audio_units(rest, &marks, &mut broken, true),
         Es::H264 | Es::H265 => bail!("packed audio cannot hold video"),
     };
     Ok((vec![units], broken))
