@@ -59,6 +59,8 @@ unmoof -o episode.mp4 -s segment-*.ts -s --lang rus --title Studio subs.vtt
 unmoof -o track.mp3 -s segment-*.ts
 ```
 
+The options:
+
 | Option | Meaning |
 |---|---|
 | `-s FILE...` | one source: an init segment and its segments, TS segments, packed audio or subtitles |
@@ -106,6 +108,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+The calls of `Remuxer` and `Plan`:
 
 | Call | Use |
 |---|---|
