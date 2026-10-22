@@ -1,4 +1,4 @@
-//! MPEG-TS input (H.264, AAC, MPEG audio) and HLS packed audio (bare frames behind an ID3 tag).
+//! MPEG-TS input (H.264, HEVC, AAC, MPEG audio) and HLS packed audio (bare frames behind an ID3 tag).
 //!
 //! TS samples lie scattered over 188-byte packets, so a file is read twice: once for the sample
 //! tables, once more to cut the samples out ([`crate::Plan::render`]). Both readings go through
@@ -11,6 +11,7 @@ use crate::{Result, bail};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Es {
     H264,
+    H265,
     Aac,
     /// MP1, MP2 or MP3.
     Mpa,
@@ -20,15 +21,21 @@ impl Es {
     fn from_stream_type(t: u8) -> Option<Es> {
         match t {
             0x1b => Some(Es::H264),
+            0x24 => Some(Es::H265),
             0x0f => Some(Es::Aac),
             0x03 | 0x04 => Some(Es::Mpa),
             _ => None,
         }
     }
 
+    pub fn is_video(self) -> bool {
+        matches!(self, Es::H264 | Es::H265)
+    }
+
     fn stream_type(self) -> u8 {
         match self {
             Es::H264 => 0x1b,
+            Es::H265 => 0x24,
             Es::Aac => 0x0f,
             Es::Mpa => 0x03,
         }
@@ -281,7 +288,8 @@ pub fn samples(b: &[u8], pids: &[(Es, u16)]) -> Result<(Vec<Vec<Unit>>, usize)> 
     let mut out = Vec::with_capacity(pids.len());
     for (i, (buf, marks)) in es.iter().enumerate() {
         out.push(match pids[i].0 {
-            Es::H264 => h264_units(buf, marks),
+            Es::H264 => video_units(buf, marks, false),
+            Es::H265 => video_units(buf, marks, true),
             Es::Aac => aac_units(buf, marks, &mut broken),
             Es::Mpa => mpa_units(buf, marks, &mut broken),
         });
@@ -334,21 +342,34 @@ fn nal_starts(b: &[u8]) -> Vec<(usize, usize)> {
     out
 }
 
-fn h264_units(b: &[u8], marks: &[Mark]) -> Vec<Unit> {
+/// The access units of H.264, or of HEVC when `hevc` is set.
+fn video_units(b: &[u8], marks: &[Mark], hevc: bool) -> Vec<Unit> {
     let nals = nal_starts(b);
-    // Access unit boundaries: an AUD; an SPS, PPS or SEI after a picture; or the first slice
-    // (first_mb_in_slice 0) of another picture.
+    // An access unit starts at an AUD, at a parameter set or SEI after a picture, or at another
+    // picture's first slice (H.264 7.4.1.2.3, H.265 7.4.2.4.4).
     let mut starts: Vec<usize> = Vec::new();
     let mut has_vcl = false;
     for (k, &(_, n)) in nals.iter().enumerate() {
         let Some(&h) = b.get(n) else { continue };
-        let t = h & 0x1f;
-        let vcl = (1..=5).contains(&t);
-        let first_slice = vcl && b.get(n + 1).is_some_and(|x| x & 0x80 != 0);
-        let begins = match t {
-            9 => true,
-            6 | 7 | 8 | 14 | 15 | 16 | 17 | 18 => has_vcl,
-            _ => first_slice && has_vcl,
+        let t = codec::nal_type(h, hevc);
+        let vcl = if hevc { t <= 31 } else { (1..=5).contains(&t) };
+
+        // A slice header opens with first_mb_in_slice or first_slice_segment_in_pic_flag.
+        let header_len = if hevc { 2 } else { 1 };
+        let first_slice = vcl && b.get(n + header_len).is_some_and(|x| x & 0x80 != 0);
+
+        let begins = if hevc {
+            match t {
+                35 => true,
+                32..=34 | 39 | 41..=44 | 48..=55 => has_vcl,
+                _ => first_slice && has_vcl,
+            }
+        } else {
+            match t {
+                9 => true,
+                6..=8 | 14..=18 => has_vcl,
+                _ => first_slice && has_vcl,
+            }
         };
         if begins || starts.is_empty() {
             starts.push(k);
@@ -356,6 +377,7 @@ fn h264_units(b: &[u8], marks: &[Mark]) -> Vec<Unit> {
         }
         has_vcl |= vcl;
     }
+
     let mut clock = Clock { marks, used: 0 };
     let mut out = Vec::with_capacity(starts.len());
     for (j, &k) in starts.iter().enumerate() {
@@ -365,17 +387,19 @@ fn h264_units(b: &[u8], marks: &[Mark]) -> Vec<Unit> {
         while to > from && b[to - 1] == 0 {
             to -= 1;
         }
+
         let mut data = Vec::with_capacity(to - from + 16);
         codec::annexb_to_avcc(&b[from..to], &mut data);
         if data.is_empty() {
             continue;
         }
+
         let (mark, first) = clock.at(nals[k].1);
         let (pts, dts) = match (mark, first) {
             (Some(m), true) => (m.pts, m.dts),
             _ => (None, None),
         };
-        let sync = codec::nals(&data).any(|n| n[0] & 0x1f == 5);
+        let sync = codec::nals(&data).any(|n| codec::is_random_access(n, hevc));
         out.push(Unit { pts, dts, frame_in_pes: 0, data, sync, adts: None, mpa: None });
     }
     out
@@ -538,7 +562,7 @@ fn packed_units(b: &[u8], es: Es) -> Result<(Vec<Vec<Unit>>, usize)> {
     let units = match es {
         Es::Aac => aac_units(rest, &marks, &mut broken),
         Es::Mpa => mpa_units(rest, &marks, &mut broken),
-        Es::H264 => bail!("packed audio cannot hold video"),
+        Es::H264 | Es::H265 => bail!("packed audio cannot hold video"),
     };
     Ok((vec![units], broken))
 }
@@ -556,7 +580,7 @@ mod tests {
     fn zeros_between_pictures_belong_to_neither() {
         // An IDR slice, a trailing_zero_8bits and a 4-byte start code, then the next picture.
         let es = [0, 0, 0, 1, 0x65, 0x88, 0x81, 0, 0, 0, 0, 1, 0x09, 0xf0, 0, 0, 1, 0x41, 0x9a, 0x02];
-        let units = h264_units(&es, &[]);
+        let units = video_units(&es, &[], false);
         let data: Vec<_> = units.iter().map(|u| u.data.clone()).collect();
         assert_eq!(
             data,

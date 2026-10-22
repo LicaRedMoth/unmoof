@@ -162,6 +162,8 @@ fn scenarios() -> Vec<Scenario> {
         ),
         ("ts-h264-aac", vec![sorted(&format!("{t}/synth/ts_plain"), "s", 2)], false),
         ("ts-apple-split-pes", vec![sorted(&format!("{t}/ts/apple_bipbop/src0"), "0", 1)], false),
+        ("ts-hevc-open-gop", vec![files(&format!("{t}/ts/hevc_open"), &["index0.ts", "index1.ts"])], false),
+        ("ts-hevc-422-mp3", vec![files(&format!("{t}/ts/hevc_422"), &["index0.ts"])], false),
         ("ts-mp3", vec![sorted(&format!("{t}/synth/mp3/hls_mp3"), "s", 2)], true),
         ("ts-vk-mp3-id3", vec![sorted(&format!("{t}/vk"), "seg-", 2)], true),
         ("packed-aac", vec![sorted(&format!("{t}/synth/mp3/packed_aac"), "s", 2)], false),

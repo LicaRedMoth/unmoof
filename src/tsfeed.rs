@@ -1,7 +1,7 @@
 //! Turning the samples of TS files and packed audio into tracks: times unwrapped and joined
 //! across files, sample descriptions made from parameter sets and frame headers.
 
-use crate::codec::{self, Adts, Mpa, Sps};
+use crate::codec::{self, Adts, Mpa};
 use crate::demux::{Sample, Track};
 use crate::ts::{self, Es};
 use crate::{Remuxer, Result, bail};
@@ -15,7 +15,7 @@ pub struct TsState {
     /// HLS packed audio rather than MPEG-TS: one stream, its time in an ID3 tag.
     pub packed: bool,
     tracks: Vec<Option<usize>>,
-    /// Parameter sets of each H.264 stream, by id, as first seen.
+    /// The SPS of each video stream, by id, as first seen.
     sps: Vec<Vec<(u32, Vec<u8>)>>,
     adts: Vec<Option<Adts>>,
     mpa: Vec<Option<Mpa>>,
@@ -60,7 +60,7 @@ impl Remuxer {
                 ts::streams(data)?
             };
             if pids.is_empty() {
-                bail!("source {source}: the first TS file has no H.264, AAC or MPEG audio stream");
+                bail!("source {source}: the first TS file has no H.264, HEVC, AAC or MPEG audio stream");
             }
             if !skipped.is_empty() {
                 let list: Vec<String> = skipped.iter().map(|t| format!("0x{t:02x}")).collect();
@@ -101,7 +101,7 @@ impl Remuxer {
             ));
         }
         for (i, list) in units.iter_mut().enumerate() {
-            if st.pids[i].0 == Es::H264 {
+            if st.pids[i].0.is_video() {
                 let (n, worst) = mend_picture_times(list);
                 if n > 0 {
                     self.warnings.push(format!(
@@ -164,7 +164,7 @@ impl Remuxer {
                     }
                     None => {
                         let s = &self.tracks[ti].samples;
-                        let Some(last) = s.last().filter(|_| st.pids[i].0 == Es::H264) else {
+                        let Some(last) = s.last().filter(|_| st.pids[i].0.is_video()) else {
                             st.dropped += 1;
                             continue;
                         };
@@ -174,7 +174,7 @@ impl Remuxer {
                 };
                 let t = &mut self.tracks[ti];
                 let (dts_t, dur, cto) = match st.pids[i].0 {
-                    Es::H264 => {
+                    Es::H264 | Es::H265 => {
                         (dts, 0u32, (pts - dts).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32)
                     }
                     Es::Aac | Es::Mpa => {
@@ -190,7 +190,7 @@ impl Remuxer {
                         (at, frame as u32, 0)
                     }
                 };
-                if st.pids[i].0 == Es::H264 {
+                if st.pids[i].0.is_video() {
                     let step = t.samples.last().map(|s| dts_t - s.dts).filter(|&d| d > 0).unwrap_or(3003);
                     let end = dts_t + cto as i64 + step;
                     next = next.max(end);
@@ -222,54 +222,67 @@ impl Remuxer {
     }
 
     /// The track of stream `i`, made from the first sample that can describe it. Video waits
-    /// for an access unit that carries its SPS and PPS.
+    /// for an access unit that carries its SPS and PPS, and in HEVC its VPS.
     fn ts_track(&mut self, source: usize, i: usize, u: &ts::Unit, st: &mut TsState) -> Option<usize> {
         match st.pids[i].0 {
-            Es::H264 => {
-                let mut spss = Vec::new();
-                let mut ppss = Vec::new();
+            Es::H264 | Es::H265 => {
+                let hevc = st.pids[i].0 == Es::H265;
+                let (mut vpss, mut spss, mut ppss) = (Vec::new(), Vec::new(), Vec::new());
                 for n in codec::nals(&u.data) {
-                    match n[0] & 0x1f {
-                        7 => spss.push(n.to_vec()),
-                        8 => ppss.push(n.to_vec()),
+                    match (hevc, codec::nal_type(n[0], hevc)) {
+                        (true, 32) => vpss.push(n.to_vec()),
+                        (false, 7) | (true, 33) => spss.push(n.to_vec()),
+                        (false, 8) | (true, 34) => ppss.push(n.to_vec()),
                         _ => {}
                     }
                 }
+                // The id, picture size and sample aspect ratio an SPS states.
+                let read = |s: &[u8]| {
+                    if hevc {
+                        codec::parse_hevc_sps(s).map(|p| (p.id, p.width, p.height, p.sar))
+                    } else {
+                        codec::parse_sps(s).map(|p| (p.id, p.width, p.height, p.sar))
+                    }
+                };
                 if let Some(ti) = st.tracks[i] {
                     for s in &spss {
-                        if let Some(p) = codec::parse_sps(s) {
-                            let known = st.sps[i].iter().find(|(id, _)| *id == p.id);
+                        if let Some((id, width, height, _)) = read(s) {
+                            let known = st.sps[i].iter().find(|(k, _)| *k == id);
                             if known.is_some_and(|(_, b)| b != s) && !st.warned_sps {
                                 st.warned_sps = true;
                                 self.warnings.push(format!(
-                                    "source {source}: the video's SPS changes mid-stream ({}x{} now); \
-                                     players may show it wrongly",
-                                    p.width, p.height
+                                    "source {source}: the video's SPS changes mid-stream ({width}x{height} now); \
+                                     players may show it wrongly"
                                 ));
                             }
                         }
                     }
                     return Some(ti);
                 }
-                let sps: Sps = spss.first().and_then(|s| codec::parse_sps(s))?;
-                if ppss.is_empty() {
+                let (_, width, height, sar) = spss.first().and_then(|s| read(s))?;
+                if ppss.is_empty() || (hevc && vpss.is_empty()) {
                     return None;
                 }
                 spss.dedup();
                 ppss.dedup();
-                st.sps[i] =
-                    spss.iter().filter_map(|s| codec::parse_sps(s).map(|p| (p.id, s.clone()))).collect();
+                vpss.dedup();
+                let stsd = if hevc {
+                    codec::hev1_stsd(&vpss, &spss, &ppss, &codec::parse_hevc_sps(&spss[0])?)
+                } else {
+                    codec::avc1_stsd(&spss, &ppss, &codec::parse_sps(&spss[0])?)
+                };
+                st.sps[i] = spss.iter().filter_map(|s| read(s).map(|p| (p.0, s.clone()))).collect();
                 let mut t = Track::blank(source);
                 t.src_id = st.pids[i].1 as u32;
                 t.handler = *b"vide";
-                t.codec = *b"avc1";
+                t.codec = if hevc { *b"hev1" } else { *b"avc1" };
                 t.timescale = CLOCK as u32;
-                let shown = u64::from(sps.width) * u64::from(sps.sar.0) / u64::from(sps.sar.1);
+                let shown = u64::from(width) * u64::from(sar.0) / u64::from(sar.1);
                 t.width = (shown.min(0xffff) as u32) << 16;
-                t.height = sps.height.min(0xffff) << 16;
+                t.height = height.min(0xffff) << 16;
                 t.hdlr = codec::hdlr(b"vide", "VideoHandler");
                 t.media_header = codec::vmhd();
-                t.stsd = codec::avc1_stsd(&spss, &ppss, &sps);
+                t.stsd = stsd;
                 t.ts_stream = Some(i);
                 Some(self.add_ts_track(i, t, st))
             }

@@ -1,5 +1,5 @@
-//! What TS input needs from the codecs: H.264 made length-prefixed and its SPS read, AAC and
-//! MPEG audio frame headers, and the sample entries an MP4 needs for them.
+//! What TS input needs from the codecs: H.264 and HEVC made length-prefixed and their SPS read,
+//! AAC and MPEG audio frame headers, and the sample entries an MP4 needs for them.
 
 use crate::bytes::Wr;
 
@@ -36,6 +36,18 @@ fn find_startcode(b: &[u8], from: usize) -> usize {
         i += 1;
     }
     b.len()
+}
+
+/// The type of a NAL unit from its first header byte, numbered as H.264 or HEVC number them.
+pub fn nal_type(header: u8, hevc: bool) -> u8 {
+    if hevc { header >> 1 & 0x3f } else { header & 0x1f }
+}
+
+/// Whether a NAL unit begins a picture playback can start from: an IDR picture in H.264, any
+/// IRAP picture (BLA, IDR, CRA) in HEVC, as ffmpeg marks them.
+pub fn is_random_access(nal: &[u8], hevc: bool) -> bool {
+    let t = nal_type(nal[0], hevc);
+    if hevc { (16..=23).contains(&t) } else { t == 5 }
 }
 
 /// The NAL units of a length-prefixed access unit, empty ones left out.
@@ -231,18 +243,7 @@ pub fn avc1_stsd(spss: &[Vec<u8>], ppss: &[Vec<u8>], sps: &Sps) -> Vec<u8> {
     let stsd = w.open_full(b"stsd", 0, 0);
     w.u32(1);
     let entry = w.open(b"avc1");
-    w.zeros(6);
-    w.u16(1); // data reference index
-    w.zeros(16);
-    w.u16(sps.width as u16);
-    w.u16(sps.height as u16);
-    w.u32(0x48_0000); // 72 dpi
-    w.u32(0x48_0000);
-    w.u32(0);
-    w.u16(1); // frame count
-    w.zeros(32); // compressor name
-    w.u16(0x18); // depth
-    w.i16(-1);
+    visual_entry(&mut w, sps.width, sps.height);
     let avcc = w.open(b"avcC");
     w.bytes(&[1, first[1], first[2], first[3], 0xff, 0xe0 | spss.len() as u8]);
     for s in spss {
@@ -263,12 +264,224 @@ pub fn avc1_stsd(spss: &[Vec<u8>], ppss: &[Vec<u8>], sps: &Sps) -> Vec<u8> {
         ]);
     }
     w.close(avcc);
-    if sps.sar != (1, 1) {
-        let pasp = w.open(b"pasp");
-        w.u32(sps.sar.0);
-        w.u32(sps.sar.1);
-        w.close(pasp);
+    pasp(&mut w, sps.sar);
+    w.close(entry);
+    w.close(stsd);
+    w.v
+}
+
+/// The fields of a visual sample entry before its codec's boxes.
+fn visual_entry(w: &mut Wr, width: u32, height: u32) {
+    w.zeros(6);
+    w.u16(1); // data reference index
+    w.zeros(16);
+    w.u16(width as u16);
+    w.u16(height as u16);
+    w.u32(0x48_0000); // 72 dpi
+    w.u32(0x48_0000);
+    w.u32(0);
+    w.u16(1); // frame count
+    w.zeros(32); // compressor name
+    w.u16(0x18); // depth
+    w.i16(-1);
+}
+
+fn pasp(w: &mut Wr, sar: (u32, u32)) {
+    if sar != (1, 1) {
+        let at = w.open(b"pasp");
+        w.u32(sar.0);
+        w.u32(sar.1);
+        w.close(at);
     }
+}
+
+/// What an HEVC sequence parameter set says about the picture and the stream.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HevcSps {
+    pub id: u32,
+    /// The general profile, tier and level of `profile_tier_level`, as hvcC repeats them.
+    pub ptl: [u8; 12],
+    pub sub_layers: u8,
+    pub temporal_id_nesting: bool,
+    pub chroma_format: u32,
+    pub bit_depth_luma: u32,
+    pub bit_depth_chroma: u32,
+    pub width: u32,
+    pub height: u32,
+    pub sar: (u32, u32),
+}
+
+/// Parses an HEVC SPS NAL unit, its 2-byte header included (H.265 7.3.2.2).
+pub fn parse_hevc_sps(nal: &[u8]) -> Option<HevcSps> {
+    let rbsp = unescape(nal);
+    let b = rbsp.get(2..)?;
+    let mut r = Bits { b, p: 0 };
+    r.bits(4)?; // sps_video_parameter_set_id
+    let max_sub_layers_minus1 = r.bits(3)? as usize;
+    let temporal_id_nesting = r.bit()? == 1;
+
+    // The general part of profile_tier_level is byte-aligned: the 12 bytes after the first.
+    let ptl: [u8; 12] = b.get(1..13)?.try_into().ok()?;
+    r.p += 96;
+
+    // Sub-layers may each repeat a profile (88 bits) and a level (8 bits).
+    let mut present = [(false, false); 7];
+    for p in present.iter_mut().take(max_sub_layers_minus1) {
+        *p = (r.bit()? == 1, r.bit()? == 1);
+    }
+    if max_sub_layers_minus1 > 0 {
+        r.p += 2 * (8 - max_sub_layers_minus1);
+    }
+    for &(profile, level) in present.iter().take(max_sub_layers_minus1) {
+        if profile {
+            r.p += 88;
+        }
+        if level {
+            r.p += 8;
+        }
+    }
+
+    let id = r.ue()?;
+    let chroma_format = r.ue().filter(|&c| c <= 3)?;
+    if chroma_format == 3 {
+        r.bit()?; // separate_colour_plane_flag
+    }
+
+    // Levels stop at 16 888 pixels a side; past 65 535 the SPS is damaged.
+    let coded_w = r.ue().filter(|w| (1..65536).contains(w))?;
+    let coded_h = r.ue().filter(|h| (1..65536).contains(h))?;
+    let (mut cl, mut cr, mut ct, mut cb) = (0, 0, 0, 0);
+    if r.bit()? == 1 {
+        (cl, cr, ct, cb) = (r.ue()?, r.ue()?, r.ue()?, r.ue()?);
+    }
+    let (ux, uy): (u32, u32) = match chroma_format {
+        1 => (2, 2),
+        2 => (2, 1),
+        _ => (1, 1),
+    };
+    let width = coded_w.checked_sub(ux.checked_mul(cl.checked_add(cr)?)?)?;
+    let height = coded_h.checked_sub(uy.checked_mul(ct.checked_add(cb)?)?)?;
+
+    let bit_depth_luma = r.ue()?.checked_add(8).filter(|&d| d <= 16)?;
+    let bit_depth_chroma = r.ue()?.checked_add(8).filter(|&d| d <= 16)?;
+    let sar = hevc_sar(&mut r, max_sub_layers_minus1).unwrap_or((1, 1));
+    Some(HevcSps {
+        id,
+        ptl,
+        sub_layers: max_sub_layers_minus1 as u8 + 1,
+        temporal_id_nesting,
+        chroma_format,
+        bit_depth_luma,
+        bit_depth_chroma,
+        width,
+        height,
+        sar,
+    })
+}
+
+/// The sample aspect ratio in the VUI, which only walking the rest of the SPS reaches; None
+/// when the SPS has no VUI, or ends or breaks first.
+fn hevc_sar(r: &mut Bits, max_sub_layers_minus1: usize) -> Option<(u32, u32)> {
+    let poc_lsb_bits = r.ue()?.checked_add(4).filter(|&n| n <= 16)?;
+    let first = if r.bit()? == 1 { 0 } else { max_sub_layers_minus1 };
+    // dec_pic_buffering, num_reorder_pics and max_latency_increase per sub-layer, then coding
+    // and transform block sizes and transform hierarchy depths.
+    for _ in 0..3 * (max_sub_layers_minus1 - first + 1) + 6 {
+        r.ue()?;
+    }
+    if r.bit()? == 1 && r.bit()? == 1 {
+        for size in 0..4 {
+            for _ in (0..6).step_by(if size == 3 { 3 } else { 1 }) {
+                if r.bit()? == 0 {
+                    r.ue()?;
+                } else {
+                    if size > 1 {
+                        r.se()?;
+                    }
+                    for _ in 0..64.min(1 << (4 + 2 * size)) {
+                        r.se()?;
+                    }
+                }
+            }
+        }
+    }
+    r.bits(2)?; // amp, sample_adaptive_offset
+    if r.bit()? == 1 {
+        r.bits(8)?; // pcm sample bit depths
+        r.ue()?;
+        r.ue()?;
+        r.bit()?;
+    }
+    // Short-term reference picture sets: one predicted from another counts that one's pictures.
+    let mut counts: Vec<u32> = Vec::new();
+    for i in 0..r.ue().filter(|&n| n <= 64)? {
+        if i > 0 && r.bit()? == 1 {
+            r.bit()?; // delta_rps_sign
+            r.ue()?; // abs_delta_rps_minus1
+            let mut n = 0;
+            for _ in 0..=counts[i as usize - 1] {
+                if r.bit()? == 1 || r.bit()? == 1 {
+                    n += 1;
+                }
+            }
+            counts.push(n);
+        } else {
+            let pics = r.ue().filter(|&n| n <= 16)? + r.ue().filter(|&n| n <= 16)?;
+            for _ in 0..pics {
+                r.ue()?;
+                r.bit()?;
+            }
+            counts.push(pics);
+        }
+    }
+    if r.bit()? == 1 {
+        for _ in 0..r.ue().filter(|&n| n <= 32)? {
+            r.bits(poc_lsb_bits)?; // lt_ref_pic_poc_lsb_sps
+            r.bit()?;
+        }
+    }
+    r.bits(2)?; // temporal_mvp, strong_intra_smoothing
+    if r.bit()? == 0 || r.bit()? == 0 {
+        return None; // no VUI, or no aspect ratio in it
+    }
+    let idc = r.bits(8)? as usize;
+    let sar = if idc == 255 { (r.bits(16)?, r.bits(16)?) } else { *SAR.get(idc)? };
+    (sar.0 > 0 && sar.1 > 0).then_some(sar)
+}
+
+/// An `stsd` holding one `hev1` sample entry. TS repeats the parameter sets in the stream,
+/// which `hev1` allows and `hvc1` does not.
+pub fn hev1_stsd(vpss: &[Vec<u8>], spss: &[Vec<u8>], ppss: &[Vec<u8>], sps: &HevcSps) -> Vec<u8> {
+    let mut w = Wr::default();
+    let stsd = w.open_full(b"stsd", 0, 0);
+    w.u32(1);
+    let entry = w.open(b"hev1");
+    visual_entry(&mut w, sps.width, sps.height);
+    let hvcc = w.open(b"hvcC");
+    w.bytes(&[1]);
+    w.bytes(&sps.ptl);
+    w.u16(0xf000); // min_spatial_segmentation_idc: unknown
+    w.bytes(&[
+        0xfc, // parallelismType: unknown
+        0xfc | sps.chroma_format as u8,
+        0xf8 | (sps.bit_depth_luma - 8) as u8,
+        0xf8 | (sps.bit_depth_chroma - 8) as u8,
+    ]);
+    w.u16(0); // avgFrameRate: unknown
+    w.bytes(&[sps.sub_layers.min(7) << 3 | u8::from(sps.temporal_id_nesting) << 2 | 3]);
+    w.bytes(&[3]);
+    for (t, list) in [(32u8, vpss), (33, spss), (34, ppss)] {
+        let list: Vec<&Vec<u8>> =
+            list.iter().filter(|n| n.len() <= usize::from(u16::MAX)).take(255).collect();
+        w.bytes(&[t]);
+        w.u16(list.len() as u16);
+        for n in list {
+            w.u16(n.len() as u16);
+            w.bytes(n);
+        }
+    }
+    w.close(hvcc);
+    pasp(&mut w, sps.sar);
     w.close(entry);
     w.close(stsd);
     w.v
@@ -498,6 +711,42 @@ mod tests {
         let mut out = Vec::new();
         annexb_to_avcc(&au, &mut out);
         assert_eq!(out, [0, 0, 0, 2, 0x09, 0xf0, 0, 0, 0, 6, 0x65, 0x88, 0x84, 0, 0, 0]);
+    }
+
+    fn hex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
+    #[test]
+    fn hevc_sps_of_three_encoders() {
+        // x265: Main, 1280x720 coded and 718 shown, 4:3 pixels in the VUI.
+        let open =
+            hex("42010101600000030090000003000003005da00280802d1f596566924caf0e6808000003000800000300f040");
+        let s = parse_hevc_sps(&open).unwrap();
+        assert_eq!((s.width, s.height, s.sar, s.chroma_format, s.bit_depth_luma), (1280, 718, (4, 3), 1, 8));
+        assert_eq!((s.ptl[0], s.ptl[11], s.sub_layers), (0x01, 93, 1));
+        // x265: Main 4:2:2 10 (Rext), 640x360.
+        let rext =
+            hex("4201010408000003009d0800000300003fb00502016936595924932bc05a020000030002000003003210");
+        let s = parse_hevc_sps(&rext).unwrap();
+        assert_eq!((s.width, s.height, s.sar, s.chroma_format, s.bit_depth_luma), (640, 360, (1, 1), 2, 10));
+        // Apple's bipbop: Main 10, 1920x1080, level 4.1.
+        let apple = hex(
+            "420101022000000300b0000003000003007ba003c08010e4d9c62e4912014e22224b3c929a49cb2449248b7246a923f2888ffc00040005a808080804",
+        );
+        let s = parse_hevc_sps(&apple).unwrap();
+        assert_eq!((s.width, s.height, s.chroma_format, s.bit_depth_luma), (1920, 1080, 1, 10));
+        assert_eq!((s.ptl[0], s.ptl[11]), (0x02, 123));
+        // x265 with three temporal sub-layers before the VUI that holds 16:11 pixels.
+        let layers = hex(
+            "42010401600000030090000003000003005a0000a005820191f7965652b295964932bc11a020000003002000000303c1",
+        );
+        let s = parse_hevc_sps(&layers).unwrap();
+        assert_eq!((s.width, s.height, s.sar, s.sub_layers), (704, 396, (16, 11), 3));
+        // Cut short anywhere, it gives a size or nothing, and never panics.
+        for n in 0..apple.len() {
+            let _ = parse_hevc_sps(&apple[..n]);
+        }
     }
 
     #[test]

@@ -12,7 +12,7 @@ pub const MAX_TRACK_SAMPLES: usize = 1 << 25;
 pub struct Source {
     /// The init segment as first seen, so a repeat of it can be told from a different one.
     pub moov: Option<Vec<u8>>,
-    /// Source track ID → index into `Remuxer::tracks`.
+    /// Source track ID -> index into `Remuxer::tracks`.
     tracks: Vec<(u32, usize)>,
     /// Set when the source is MPEG-TS.
     pub ts: Option<crate::tsfeed::TsState>,

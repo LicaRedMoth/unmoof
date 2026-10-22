@@ -6,7 +6,7 @@ use crate::ts::{self, Es};
 use crate::{Remuxer, Result, bail};
 
 /// Movie timescale of the output, in which edit lists place each track: at 90 kHz a track
-/// starts within 6 µs of its time, where milliseconds would leave half a millisecond.
+/// starts within 6 microseconds of its time, where milliseconds would leave half a millisecond.
 const MOVIE_TS: u32 = 90_000;
 /// A chunk closes once it spans this much media time, unless the caller sets another span.
 const CHUNK_SECS: f64 = 0.5;

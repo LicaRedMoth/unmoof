@@ -86,7 +86,7 @@ for d in $T/ts/*/; do
     files=$(cat "$d/src0/list.txt")
     $U -o "$O/$k.mp4" -s $files 2>/dev/null
     cat $files > "$O/$k.ts"
-    ffmpeg -v error -y -i "$O/$k.ts" -map 0:v -map 0:a -c copy "$O/${k}_ref.mp4"
+    ffmpeg -v error -y -i "$O/$k.ts" -map 0:v? -map 0:a? -c copy "$O/${k}_ref.mp4"
     rm -f "$O/$k.ts"
     check "$k" "$O/${k}_ref.mp4" "$O/$k.mp4"
     rm -f "$O/$k.mp4" "$O/${k}_ref.mp4"
