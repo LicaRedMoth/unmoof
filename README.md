@@ -220,4 +220,4 @@ Minimum of 30 runs on an Intel Pentium B960 (2011, 2 cores), inputs in memory
 
 ## License
 
-MIT
+MIT, see [LICENSE](LICENSE).

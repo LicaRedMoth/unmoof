@@ -1,6 +1,6 @@
 [package]
 name = "unmoof"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 description = "Remuxes HLS and DASH segments (fMP4, MPEG-TS, packed audio, subtitles) into one progressive MP4"
 license = "MIT"
