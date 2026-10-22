@@ -1,8 +1,10 @@
 //! Laying out the progressive file: chunks, their interleaving, edit lists and the `moov`.
 
 use crate::bytes::{Wr, fourcc};
+use crate::codec;
 use crate::demux::Track;
-use crate::ts::{self, Es};
+use crate::ts;
+use crate::tsfeed::TsReading;
 use crate::{Remuxer, Result, bail};
 
 /// Movie timescale of the output, in which edit lists place each track: at 90 kHz a track
@@ -70,7 +72,7 @@ pub struct Plan {
     /// The `mdat` payload that follows the header, in this order.
     pub pieces: Vec<Piece>,
     /// The streams of each MPEG-TS source and whether it is packed audio, for [`Plan::render`].
-    ts_streams: Vec<(Vec<(Es, u16)>, bool)>,
+    ts_streams: Vec<TsReading>,
     /// Size of the whole file.
     pub size: u64,
     pub tracks: Vec<TrackReport>,
@@ -134,11 +136,7 @@ impl Remuxer {
     /// Lays out the progressive file from everything fed so far.
     pub fn finish(self) -> Result<Plan> {
         let chunk_secs = self.chunk_secs.unwrap_or(CHUNK_SECS);
-        let ts_streams: Vec<(Vec<(Es, u16)>, bool)> = self
-            .sources
-            .iter()
-            .map(|s| s.ts.as_ref().map(|t| (t.pids.clone(), t.packed)).unwrap_or_default())
-            .collect();
+        let ts_streams = self.ts_readings();
         let mut warnings = self.warnings;
         let mut tracks = Vec::new();
         let mut snapped = Vec::new();
@@ -173,6 +171,11 @@ impl Remuxer {
                     t.source
                 ));
             } else {
+                if &t.codec == b"hvc1" {
+                    for &(i, cut) in &t.ps_cuts {
+                        t.samples[i].size -= cut;
+                    }
+                }
                 t.close_ts(&mut warnings);
                 snapped.push(t.snap_audio());
                 tracks.push(t);
@@ -435,11 +438,7 @@ impl Remuxer {
     /// Lays out a bare MP3 file: the frames of the one MPEG audio track, in order, with no
     /// container around them, which is all an `.mp3` file is.
     pub fn finish_mp3(self) -> Result<Plan> {
-        let ts_streams: Vec<(Vec<(Es, u16)>, bool)> = self
-            .sources
-            .iter()
-            .map(|s| s.ts.as_ref().map(|t| (t.pids.clone(), t.packed)).unwrap_or_default())
-            .collect();
+        let ts_streams = self.ts_readings();
         let mut warnings = self.warnings;
         let mut found = None;
         for t in self.tracks {
@@ -508,15 +507,20 @@ impl Plan {
         let Some(Piece::Render { len, source, parts, .. }) = self.pieces.get(piece) else {
             bail!("piece {piece} is not a TS piece");
         };
-        let (pids, packed) = &self.ts_streams[*source];
-        let (units, _) = ts::units(data, pids, *packed)?;
+        let reading = &self.ts_streams[*source];
+        let (units, _) = ts::units(data, &reading.pids, reading.packed)?;
         let mut out = Vec::with_capacity(*len as usize);
         for &(stream, first, n) in parts {
             let Some(run) = units.get(stream).and_then(|u| u.get(first as usize..(first + n) as usize))
             else {
                 bail!("a TS file holds fewer samples than when it was fed; has it changed?");
             };
-            run.iter().for_each(|u| out.extend_from_slice(&u.data));
+            match reading.strip.get(stream).and_then(Option::as_ref) {
+                Some(known) => {
+                    run.iter().for_each(|u| out.extend(codec::strip_parameter_sets(&u.data, known)))
+                }
+                None => run.iter().for_each(|u| out.extend_from_slice(&u.data)),
+            }
         }
         if out.len() as u64 != *len {
             bail!("a TS file gives {} bytes of samples where {len} were planned; has it changed?", out.len());

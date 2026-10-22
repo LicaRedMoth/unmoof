@@ -86,7 +86,12 @@ for d in $T/ts/*/; do
     files=$(cat "$d/src0/list.txt")
     $U -o "$O/$k.mp4" -s $files 2>/dev/null
     cat $files > "$O/$k.ts"
-    ffmpeg -v error -y -i "$O/$k.ts" -map 0:v? -map 0:a? -c copy "$O/${k}_ref.mp4"
+    # unmoof writes HEVC as hvc1, with the parameter sets only in the sample entry.
+    hvc1=()
+    if [ "$(ffprobe -v error -select_streams v -show_entries stream=codec_name -of csv=p=0 "$O/$k.ts" | head -1)" = hevc ]; then
+        hvc1=(-bsf:v "filter_units=remove_types=32|33|34" -tag:v hvc1)
+    fi
+    ffmpeg -v error -y -i "$O/$k.ts" -map 0:v? -map 0:a? -c copy "${hvc1[@]}" "$O/${k}_ref.mp4"
     rm -f "$O/$k.ts"
     check "$k" "$O/${k}_ref.mp4" "$O/$k.mp4"
     rm -f "$O/$k.mp4" "$O/${k}_ref.mp4"

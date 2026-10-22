@@ -32,6 +32,31 @@ pub struct TsState {
     warned_sps: bool,
     warned_adts: bool,
     dropped: usize,
+    /// For each HEVC stream still written as hvc1, what its sample entry was made from.
+    hevc: Vec<Option<HevcSets>>,
+}
+
+/// The parameter sets and SPS an HEVC sample entry was made from.
+struct HevcSets {
+    vpss: Vec<Vec<u8>>,
+    spss: Vec<Vec<u8>>,
+    ppss: Vec<Vec<u8>>,
+    sps: codec::HevcSps,
+}
+
+impl HevcSets {
+    fn all(&self) -> Vec<Vec<u8>> {
+        [&self.vpss[..], &self.spss[..], &self.ppss[..]].concat()
+    }
+}
+
+/// How `Plan::render` reads a source's TS files again: its streams, whether it is packed audio,
+/// and per stream the parameter sets to leave out of the samples.
+#[derive(Clone, Default)]
+pub struct TsReading {
+    pub pids: Vec<(Es, u16)>,
+    pub packed: bool,
+    pub strip: Vec<Option<Vec<Vec<u8>>>>,
 }
 
 impl TsState {
@@ -85,6 +110,7 @@ impl Remuxer {
                 warned_sps: false,
                 warned_adts: false,
                 dropped: 0,
+                hevc: (0..n).map(|_| None).collect(),
             });
         }
         let mut st = self.sources[source].ts.take().unwrap();
@@ -197,6 +223,28 @@ impl Remuxer {
                     st.ends[i] = Some(st.ends[i].map_or(end, |e| e.max(end)));
                     st.last_dts = Some(st.last_dts.map_or(dts_t, |l| l.max(dts_t)));
                 }
+                if let Some(sets) = &st.hevc[i] {
+                    let known = sets.all();
+                    let mut cut = 0u32;
+                    let mut unknown = false;
+                    for n in codec::nals(&u.data).filter(|n| codec::is_hevc_parameter_set(n)) {
+                        if known.iter().any(|k| k == n) {
+                            cut += 4 + n.len() as u32;
+                        } else {
+                            unknown = true;
+                        }
+                    }
+
+                    if unknown {
+                        // Parameter sets that change mid-stream must stay in the samples: hev1.
+                        t.stsd = codec::hevc_stsd(&sets.vpss, &sets.spss, &sets.ppss, &sets.sps, false);
+                        t.codec = *b"hev1";
+                        t.ps_cuts.clear();
+                        st.hevc[i] = None;
+                    } else if cut > 0 {
+                        t.ps_cuts.push((t.samples.len(), cut));
+                    }
+                }
                 t.samples.push(Sample {
                     dts: dts_t,
                     dur,
@@ -266,8 +314,14 @@ impl Remuxer {
                 spss.dedup();
                 ppss.dedup();
                 vpss.dedup();
+
+                // HEVC starts out as hvc1; a parameter set seen later that differs turns it hev1.
                 let stsd = if hevc {
-                    codec::hev1_stsd(&vpss, &spss, &ppss, &codec::parse_hevc_sps(&spss[0])?)
+                    let sps = codec::parse_hevc_sps(&spss[0])?;
+                    let stsd = codec::hevc_stsd(&vpss, &spss, &ppss, &sps, true);
+                    st.hevc[i] =
+                        Some(HevcSets { vpss: vpss.clone(), spss: spss.clone(), ppss: ppss.clone(), sps });
+                    stsd
                 } else {
                     codec::avc1_stsd(&spss, &ppss, &codec::parse_sps(&spss[0])?)
                 };
@@ -275,7 +329,7 @@ impl Remuxer {
                 let mut t = Track::blank(source);
                 t.src_id = st.pids[i].1 as u32;
                 t.handler = *b"vide";
-                t.codec = if hevc { *b"hev1" } else { *b"avc1" };
+                t.codec = if hevc { *b"hvc1" } else { *b"avc1" };
                 t.timescale = CLOCK as u32;
                 let shown = u64::from(width) * u64::from(sar.0) / u64::from(sar.1);
                 t.width = (shown.min(0xffff) as u32) << 16;
@@ -336,6 +390,16 @@ impl Remuxer {
         t.stsd = stsd;
         t.ts_stream = Some(i);
         self.add_ts_track(i, t, st)
+    }
+
+    /// How each source's TS files are read again when the output is written.
+    pub(crate) fn ts_readings(&self) -> Vec<TsReading> {
+        let reading = |st: &TsState| TsReading {
+            pids: st.pids.clone(),
+            packed: st.packed,
+            strip: st.hevc.iter().map(|h| h.as_ref().map(HevcSets::all)).collect(),
+        };
+        self.sources.iter().map(|s| s.ts.as_ref().map(reading).unwrap_or_default()).collect()
     }
 
     fn add_ts_track(&mut self, i: usize, t: Track, st: &mut TsState) -> usize {

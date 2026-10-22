@@ -449,13 +449,19 @@ fn hevc_sar(r: &mut Bits, max_sub_layers_minus1: usize) -> Option<(u32, u32)> {
     (sar.0 > 0 && sar.1 > 0).then_some(sar)
 }
 
-/// An `stsd` holding one `hev1` sample entry. TS repeats the parameter sets in the stream,
-/// which `hev1` allows and `hvc1` does not.
-pub fn hev1_stsd(vpss: &[Vec<u8>], spss: &[Vec<u8>], ppss: &[Vec<u8>], sps: &HevcSps) -> Vec<u8> {
+/// An `stsd` holding one HEVC sample entry. With `complete` it is `hvc1`: these are all the
+/// parameter sets, and the samples carry none. Otherwise it is `hev1`, and samples may too.
+pub fn hevc_stsd(
+    vpss: &[Vec<u8>],
+    spss: &[Vec<u8>],
+    ppss: &[Vec<u8>],
+    sps: &HevcSps,
+    complete: bool,
+) -> Vec<u8> {
     let mut w = Wr::default();
     let stsd = w.open_full(b"stsd", 0, 0);
     w.u32(1);
-    let entry = w.open(b"hev1");
+    let entry = w.open(if complete { b"hvc1" } else { b"hev1" });
     visual_entry(&mut w, sps.width, sps.height);
     let hvcc = w.open(b"hvcC");
     w.bytes(&[1]);
@@ -473,7 +479,7 @@ pub fn hev1_stsd(vpss: &[Vec<u8>], spss: &[Vec<u8>], ppss: &[Vec<u8>], sps: &Hev
     for (t, list) in [(32u8, vpss), (33, spss), (34, ppss)] {
         let list: Vec<&Vec<u8>> =
             list.iter().filter(|n| n.len() <= usize::from(u16::MAX)).take(255).collect();
-        w.bytes(&[t]);
+        w.bytes(&[if complete { 0x80 | t } else { t }]); // array_completeness, NAL unit type
         w.u16(list.len() as u16);
         for n in list {
             w.u16(n.len() as u16);
@@ -485,6 +491,30 @@ pub fn hev1_stsd(vpss: &[Vec<u8>], spss: &[Vec<u8>], ppss: &[Vec<u8>], sps: &Hev
     w.close(entry);
     w.close(stsd);
     w.v
+}
+
+/// Whether an HEVC NAL unit is a VPS, SPS or PPS.
+pub fn is_hevc_parameter_set(nal: &[u8]) -> bool {
+    (32..=34).contains(&nal_type(nal[0], true))
+}
+
+/// A length-prefixed HEVC access unit without the parameter sets that equal one in `known`.
+pub fn strip_parameter_sets(avcc: &[u8], known: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(avcc.len());
+    let mut p = 0;
+    while p + 4 <= avcc.len() {
+        let n = u32::from_be_bytes(avcc[p..p + 4].try_into().unwrap()) as usize;
+        let end = (p + 4).saturating_add(n).min(avcc.len());
+        let nal = &avcc[p + 4..end];
+
+        let known_set = !nal.is_empty() && is_hevc_parameter_set(nal) && known.iter().any(|k| k == nal);
+        if !known_set {
+            out.extend_from_slice(&avcc[p..end]);
+        }
+        p = end;
+    }
+    out.extend_from_slice(&avcc[p..]);
+    out
 }
 
 /// The fixed header of an ADTS frame.

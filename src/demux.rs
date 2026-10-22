@@ -97,6 +97,9 @@ pub struct Track {
     pub data: Vec<u8>,
     /// Times count from the start of the movie, not from a clock the other tracks share.
     pub relative: bool,
+    /// For HEVC from TS written as hvc1: samples, by index, and how many bytes of parameter
+    /// sets the sample entry already holds are cut from each.
+    pub ps_cuts: Vec<(usize, u32)>,
 }
 
 impl Track {
@@ -126,6 +129,7 @@ impl Track {
             title: None,
             data: Vec::new(),
             relative: false,
+            ps_cuts: Vec::new(),
         }
     }
 
