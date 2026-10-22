@@ -410,83 +410,87 @@ impl Remuxer {
 
         let audio = self.tracks[ti].is_audio();
         let limit = self.file_sizes.get(file as usize).copied().flatten();
+        // The tfdt times the whole fragment, though some packagers write it after the truns.
+        for b in boxes(payload) {
+            let b = b?;
+            if &b.typ == b"tfdt" {
+                let mut r = Rd::new(b.payload);
+                let (v, _) = r.full()?;
+                // 2^62 ticks is millennia at any timescale; above it the box is damaged, and
+                // capping it keeps all timeline arithmetic inside i64.
+                let t = if v == 1 { r.u64()? } else { u64::from(r.u32()?) }.min(1 << 62) as i64;
+                resync(&mut self.tracks[ti], t, &mut self.warnings);
+                break;
+            }
+        }
+
         let mut cursor = base;
         let mut first_trun = true;
         for b in it {
             let b = b?;
-            match &b.typ {
-                b"tfdt" => {
-                    let mut r = Rd::new(b.payload);
-                    let (v, _) = r.full()?;
-                    // 2^62 ticks is millennia at any timescale; above it the box is damaged, and
-                    // capping it keeps all timeline arithmetic inside i64.
-                    let t = if v == 1 { r.u64()? } else { u64::from(r.u32()?) }.min(1 << 62) as i64;
-                    resync(&mut self.tracks[ti], t, &mut self.warnings);
+            if &b.typ != b"trun" {
+                continue;
+            }
+            let mut r = Rd::new(b.payload);
+            let (v, tf) = r.full()?;
+            let n = r.u32()? as usize;
+            if tf & 0x01 != 0 {
+                let Some(c) = base.checked_add_signed(r.i32()? as i64) else {
+                    bail!("a trun points its data before the start of the file");
+                };
+                cursor = c;
+            } else if first_trun {
+                cursor = base;
+            }
+            first_trun = false;
+            let first_flags = if tf & 0x04 != 0 { Some(r.u32()?) } else { None };
+            let per = [0x100, 0x200, 0x400, 0x800].iter().filter(|&&f| tf & f != 0).count() * 4;
+            if n > MAX_TRUN_SAMPLES || r.left() < n * per {
+                bail!("a trun lists {n} samples but holds the fields of fewer");
+            }
+            let track = &mut self.tracks[ti];
+            if track.samples.len() + n > MAX_TRACK_SAMPLES {
+                bail!(
+                    "track {} has more than {MAX_TRACK_SAMPLES} samples; the stream is damaged",
+                    track.src_id
+                );
+            }
+            track.samples.reserve(n);
+            for i in 0..n {
+                let dur = if tf & 0x100 != 0 { r.u32()? } else { def_dur };
+                let size = if tf & 0x200 != 0 { r.u32()? } else { def_size };
+                let flags = if tf & 0x400 != 0 {
+                    r.u32()?
+                } else if i == 0 && first_flags.is_some() {
+                    first_flags.unwrap()
+                } else {
+                    def_flags
+                };
+                let cto = if tf & 0x800 != 0 {
+                    let c = r.u32()?;
+                    if v == 0 { c.min(i32::MAX as u32) as i32 } else { c as i32 }
+                } else {
+                    0
+                };
+                track.samples.push(Sample {
+                    dts: track.next_dts,
+                    dur,
+                    size,
+                    cto,
+                    // Every audio frame of the codecs carried here decodes alone.
+                    sync: audio || flags & 0x1_0000 == 0,
+                    sdi,
+                    file,
+                    off: cursor,
+                });
+                track.next_dts += dur as i64;
+                let Some(c) = cursor.checked_add(size as u64) else {
+                    bail!("a trun points its data past any file's end");
+                };
+                if limit.is_some_and(|l| c > l) {
+                    bail!("a trun points its data past the end of its {}-byte file", limit.unwrap());
                 }
-                b"trun" => {
-                    let mut r = Rd::new(b.payload);
-                    let (v, tf) = r.full()?;
-                    let n = r.u32()? as usize;
-                    if tf & 0x01 != 0 {
-                        let Some(c) = base.checked_add_signed(r.i32()? as i64) else {
-                            bail!("a trun points its data before the start of the file");
-                        };
-                        cursor = c;
-                    } else if first_trun {
-                        cursor = base;
-                    }
-                    first_trun = false;
-                    let first_flags = if tf & 0x04 != 0 { Some(r.u32()?) } else { None };
-                    let per = [0x100, 0x200, 0x400, 0x800].iter().filter(|&&f| tf & f != 0).count() * 4;
-                    if n > MAX_TRUN_SAMPLES || r.left() < n * per {
-                        bail!("a trun lists {n} samples but holds the fields of fewer");
-                    }
-                    let track = &mut self.tracks[ti];
-                    if track.samples.len() + n > MAX_TRACK_SAMPLES {
-                        bail!(
-                            "track {} has more than {MAX_TRACK_SAMPLES} samples; the stream is damaged",
-                            track.src_id
-                        );
-                    }
-                    track.samples.reserve(n);
-                    for i in 0..n {
-                        let dur = if tf & 0x100 != 0 { r.u32()? } else { def_dur };
-                        let size = if tf & 0x200 != 0 { r.u32()? } else { def_size };
-                        let flags = if tf & 0x400 != 0 {
-                            r.u32()?
-                        } else if i == 0 && first_flags.is_some() {
-                            first_flags.unwrap()
-                        } else {
-                            def_flags
-                        };
-                        let cto = if tf & 0x800 != 0 {
-                            let c = r.u32()?;
-                            if v == 0 { c.min(i32::MAX as u32) as i32 } else { c as i32 }
-                        } else {
-                            0
-                        };
-                        track.samples.push(Sample {
-                            dts: track.next_dts,
-                            dur,
-                            size,
-                            cto,
-                            // Every audio frame of the codecs carried here decodes alone.
-                            sync: audio || flags & 0x1_0000 == 0,
-                            sdi,
-                            file,
-                            off: cursor,
-                        });
-                        track.next_dts += dur as i64;
-                        let Some(c) = cursor.checked_add(size as u64) else {
-                            bail!("a trun points its data past any file's end");
-                        };
-                        if limit.is_some_and(|l| c > l) {
-                            bail!("a trun points its data past the end of its {}-byte file", limit.unwrap());
-                        }
-                        cursor = c;
-                    }
-                }
-                _ => {}
+                cursor = c;
             }
         }
         Ok(cursor)

@@ -97,6 +97,26 @@ fn plan_adds_up(rm: Remuxer) {
 }
 
 #[test]
+fn tfdt_after_trun_still_times_the_fragment() {
+    // Some packagers write tfhd, trun, tfdt. Fragments of 4 samples of 1024 ticks, back to back.
+    let late_tfdt = |time: u64| {
+        let tfhd = full(b"tfhd", 0, 0x02_0000, &1u32.to_be_bytes());
+        let trun = full(b"trun", 0, 0x01, &[4u32.to_be_bytes(), 0i32.to_be_bytes()].concat());
+        let tfdt = full(b"tfdt", 1, 0, &time.to_be_bytes());
+        let traf = bx(b"traf", &cat(&[tfhd, trun, tfdt]));
+        cat(&[bx(b"moof", &cat(&[full(b"mfhd", 0, 0, &1u32.to_be_bytes()), traf])), bx(b"mdat", &[0u8; 40])])
+    };
+    let mut rm = Remuxer::new();
+    let s = rm.add_source();
+    rm.feed(s, 0, 0, &cat(&[init(), late_tfdt(0)])).unwrap();
+    rm.feed(s, 1, 0, &late_tfdt(4096)).unwrap();
+    let plan = rm.finish().unwrap();
+    assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
+    assert_eq!(plan.tracks[0].samples, 8);
+    assert!((plan.tracks[0].duration - 8.192).abs() < 0.001, "{}", plan.tracks[0].duration);
+}
+
+#[test]
 fn healthy_fragment_lays_out() {
     let mut rm = Remuxer::new();
     let s = rm.add_source();
